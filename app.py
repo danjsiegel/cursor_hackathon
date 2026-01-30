@@ -6,6 +6,7 @@ A 10-step autonomous loop with MiniMax reasoning, DuckDB memory, and Streamlit U
 import base64
 import json
 import os
+import platform
 import re
 import uuid
 from datetime import datetime
@@ -34,6 +35,29 @@ MINIMAX_API_KEY = os.getenv("MINIMAX_API_KEY")
 MINIMAX_BASE_URL = (os.getenv("MINIMAX_BASE_URL") or "https://api.minimax.io").rstrip("/")
 MINIMAX_CHAT_URL = f"{MINIMAX_BASE_URL}/v1/text/chatcompletion_v2"
 USE_MINIMAX_STUB = os.getenv("USE_MINIMAX_STUB", "true").lower() in ("true", "1", "yes") or not MINIMAX_API_KEY
+
+# -----------------------------------------------------------------------------
+# User environment (OS, browser) for prompts
+# -----------------------------------------------------------------------------
+def get_user_environment(browser_override: Optional[str] = None) -> str:
+    """Build a short description of the user's OS and browser for MiniMax context."""
+    parts = []
+    sys_name = platform.system()
+    if sys_name == "Darwin":
+        mac_ver = platform.mac_ver()
+        os_part = f"macOS {mac_ver[0]}" if mac_ver[0] else "macOS"
+    else:
+        os_part = f"{sys_name} {platform.release()}".strip()
+    parts.append(os_part)
+    try:
+        machine = platform.machine()
+        if machine:
+            parts.append(machine)
+    except Exception:
+        pass
+    browser = (browser_override or "").strip() or "unknown"
+    parts.append(f"Browser: {browser}")
+    return "; ".join(parts)
 
 # -----------------------------------------------------------------------------
 # DuckDB Schema and Initialization
@@ -103,11 +127,21 @@ def init_db():
             original_goal VARCHAR,
             perfect_prompt VARCHAR,
             summary VARCHAR,
+            validation_achieved VARCHAR,
+            validation_reason VARCHAR,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (session_id) REFERENCES sessions(id)
         )
     """)
-    
+    try:
+        con.execute("ALTER TABLE post_mortems ADD COLUMN validation_achieved VARCHAR")
+    except Exception:
+        pass
+    try:
+        con.execute("ALTER TABLE post_mortems ADD COLUMN validation_reason VARCHAR")
+    except Exception:
+        pass
+
     con.close()
     return True
 
@@ -150,10 +184,11 @@ def _encode_screenshot_base64(screenshot_path: str) -> Optional[str]:
         return None
 
 
-def _call_minimax_api(screenshot_path: str, goal: str, history: list, is_first_step: bool = False) -> Optional[dict]:
+def _call_minimax_api(screenshot_path: str, goal: str, history: list, is_first_step: bool = False, user_env: str = "") -> Optional[dict]:
     """
     Call MiniMax chatcompletion_v2 with screenshot (base64), goal, and history.
     Asks for thought, code, status. On first step also asks for total_steps and checkpoints.
+    user_env: e.g. "macOS 14.2.1; arm64; Browser: Firefox" for prompt context.
     Returns parsed dict or None on failure.
     """
     b64 = _encode_screenshot_base64(screenshot_path)
@@ -176,8 +211,9 @@ Example first response:
 {"thought": "I see the desktop. I will open Calculator via Run.", "code": "import pyautogui; pyautogui.hotkey('command', 'space'); pyautogui.write('Calculator'); pyautogui.press('enter')", "status": "CONTINUE", "total_steps": 3, "checkpoints": [2]}
 """
 
+    user_context_line = f"\n**User context:** {user_env}\n" if user_env else ""
     system_prompt = """You are the reasoning engine for the Universal Tasker: an autonomous UI agent that completes a user's goal by controlling the computer with Python.
-
+""" + user_context_line + """
 ## What we do
 - We send you the current screen (screenshot image) and the user's goal.
 - You respond with exactly one "next step": your reasoning, one snippet of Python code we will execute, and a status.
@@ -315,19 +351,96 @@ Example first response:
     return out
 
 
-def analyze_screenshot(screenshot_path: str, goal: str, history: list) -> dict:
+def validate_goal_achieved(goal: str, screenshot_path: str, user_env: str = "") -> Optional[dict]:
+    """
+    Send the final screenshot to MiniMax with a validation-only prompt:
+    "Was what was asked achieved in this screenshot?" Returns {achieved: bool, reason: str} or None.
+    user_env: e.g. "macOS 14.2.1; Browser: Firefox" for context.
+    """
+    if USE_MINIMAX_STUB or not MINIMAX_API_KEY:
+        return None
+    b64 = _encode_screenshot_base64(screenshot_path)
+    if not b64:
+        return None
+
+    system_prompt = """You are a validator. Given a user's goal and a screenshot of the final state after a task, determine if what was asked was achieved.
+Respond with exactly one JSON object, no markdown, no other text:
+- "achieved": true or false
+- "reason": one or two sentences explaining what you see and why it does or does not match the goal."""
+    if user_env:
+        system_prompt += f"\n**User context:** {user_env}"
+
+    user_text = f"The user asked for: {goal}\n\n"
+    if user_env:
+        user_text += f"User context: {user_env}\n\n"
+    user_text += "This screenshot shows the final state. Is what was asked achieved? Respond with only a JSON object: {\"achieved\": true or false, \"reason\": \"...\"}."
+
+    content_parts = [{"type": "text", "text": user_text}, {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}]
+    payload = {
+        "model": "MiniMax-M2.1",
+        "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": content_parts}],
+        "max_tokens": 256,
+    }
+    headers = {"Authorization": f"Bearer {MINIMAX_API_KEY}", "Content-Type": "application/json"}
+
+    try:
+        r = requests.post(MINIMAX_CHAT_URL, headers=headers, json=payload, timeout=30)
+        if r.status_code == 400:
+            r = requests.post(
+                MINIMAX_CHAT_URL,
+                headers=headers,
+                json={
+                    "model": "MiniMax-M2.1",
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_text + "\n\n(Screenshot was captured but could not be attached.)"},
+                    ],
+                    "max_tokens": 256,
+                },
+                timeout=30,
+            )
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        st.warning(f"Validation request failed: {e}")
+        return None
+
+    if (data.get("base_resp") or {}).get("status_code") != 0:
+        return None
+    raw = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+    parsed = None
+    for pattern in [r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}"]:
+        m = re.search(pattern, raw)
+        if m:
+            try:
+                parsed = json.loads(m.group(1) if "```" in pattern else m.group(0))
+                break
+            except json.JSONDecodeError:
+                pass
+    if not parsed:
+        try:
+            parsed = json.loads(raw.strip())
+        except json.JSONDecodeError:
+            return None
+    achieved = parsed.get("achieved") in (True, "true", "yes", 1)
+    reason = str(parsed.get("reason") or "").strip() or "No reason given."
+    return {"achieved": bool(achieved), "reason": reason}
+
+
+def analyze_screenshot(screenshot_path: str, goal: str, history: list, user_env: str = "") -> dict:
     """
     Analyze screenshot and determine next action.
     
     Uses stub when USE_MINIMAX_STUB=true or MINIMAX_API_KEY is unset.
     Set MINIMAX_API_KEY in .env and USE_MINIMAX_STUB=false for real MiniMax API.
+    user_env: e.g. "macOS 14.2.1; Browser: Firefox" for prompt context.
     
     Returns:
         dict with keys: thought, code, status
     """
     if not USE_MINIMAX_STUB and MINIMAX_API_KEY:
         is_first = len(history) == 0
-        result = _call_minimax_api(screenshot_path, goal, history, is_first_step=is_first)
+        result = _call_minimax_api(screenshot_path, goal, history, is_first_step=is_first, user_env=user_env)
         if result is not None:
             thought = result.get("thought", "")
             code = result.get("code", "")
@@ -428,6 +541,8 @@ def main():
         st.session_state.planned_total_steps = None  # from MiniMax first step
     if 'checkpoints' not in st.session_state:
         st.session_state.checkpoints = []  # step numbers to take validation screenshot
+    if 'user_browser' not in st.session_state:
+        st.session_state.user_browser = ""  # optional: "Firefox", "Chrome", etc. for prompt context
 
     # Left Sidebar: Attempt N / max M (eval cycle; no fixed 10-step)
     with st.sidebar:
@@ -484,9 +599,9 @@ def main():
                             for step, thought, step_status, outcome, _ in logs:
                                 icon = "✅" if outcome == "Pass" else "❌" if outcome == "Fail" else "⏳"
                                 st.markdown(f"{icon} Step {step} ({step_status})")
-                                st.text(thought[:150] + "…" if thought and len(thought) > 150 else (thought or ""))
+                                st.text(thought or "—")
                         pm = con.execute("""
-                            SELECT original_goal, perfect_prompt, summary
+                            SELECT original_goal, perfect_prompt, summary, validation_achieved, validation_reason
                             FROM post_mortems
                             WHERE session_id = ?
                             LIMIT 1
@@ -495,6 +610,12 @@ def main():
                             st.markdown("**Post-mortem**")
                             st.caption(pm[2] or "")
                             st.code(pm[1] or "", language="markdown")
+                            if len(pm) >= 5 and (pm[3] is not None or pm[4]):
+                                st.markdown("**End validation**")
+                                if str(pm[3]).lower() == "true":
+                                    st.success(f"Achieved — {pm[4] or ''}")
+                                else:
+                                    st.error(f"Not achieved — {pm[4] or ''}")
                     finally:
                         con.close()
         else:
@@ -522,6 +643,12 @@ def main():
     with col2:
         st.subheader("Goal")
         goal_input = st.text_area("Enter your goal:", placeholder="Open Calculator and type 'Hello World'", height=100)
+        st.text_input(
+            "Your browser (optional)",
+            placeholder="e.g. Firefox, Chrome, Safari",
+            help="Included in the prompt so the agent knows your environment.",
+            key="user_browser",
+        )
         max_steps_input = st.number_input("Max attempts (retry cap)", min_value=1, max_value=100, value=10, help="Stop after this many steps or when agent returns SUCCESS/LOST.")
         
         start_btn = st.button("Start Task", type="primary", disabled=st.session_state.get("is_running"))
@@ -576,8 +703,8 @@ def main():
                 for log in logs:
                     step, thought, status, outcome, created = log
                     status_icon = "✅" if outcome == "Pass" else "❌" if outcome == "Fail" else "⏳"
-                    st.markdown(f"**Step {step}** {status_icon}")
-                    st.text(thought[:100] + "..." if len(thought) > 100 else thought)
+                    st.markdown(f"**Step {step}** {status_icon} ({status})")
+                    st.text(thought or "—")
                     st.divider()
             else:
                 st.text("No logs yet.")
@@ -599,9 +726,10 @@ def main():
             ).fetchone()
             goal = goal_row[0] if goal_row else ""
             
-            # Call MiniMax (or stub)
+            # Call MiniMax (or stub) with user context (OS, browser)
+            user_env = get_user_environment(st.session_state.get("user_browser", ""))
             result = analyze_screenshot(
-                screenshot_path, goal, st.session_state.history
+                screenshot_path, goal, st.session_state.history, user_env=user_env
             )
             
             thought = result["thought"]
@@ -661,7 +789,8 @@ def main():
                 validation_path = f"{SCREENSHOTS_DIR}/{st.session_state.session_id}/step_{st.session_state.step_number}_validation.png"
                 capture_screenshot(validation_path)
             
-            # Log to DuckDB
+            # Log to DuckDB (action = short summary of thought for display)
+            action_summary = (thought[:120] + "…") if thought and len(thought) > 120 else (thought or "—")
             con.execute("""
                 INSERT INTO audit_log 
                 (session_id, step_number, thought, code, action, feedback, status, outcome, 
@@ -672,7 +801,7 @@ def main():
                 st.session_state.step_number,
                 thought,
                 code,
-                "Demo action",  # action summary
+                action_summary,
                 feedback,
                 status,
                 outcome,
@@ -728,21 +857,46 @@ def main():
         
         if st.session_state.get("session_id"):
             con = get_connection()
-            refined = generate_refined_prompt(con, st.session_state.session_id)
-            
-            st.markdown("### Optimized Prompt for Next Time")
-            st.code(refined, language="markdown")
-            
-            # Save to post_mortems
             goal_row = con.execute(
-                "SELECT goal FROM sessions WHERE id = ?", [st.session_state.session_id]
+                "SELECT goal, status FROM sessions WHERE id = ?", [st.session_state.session_id]
             ).fetchone()
             original_goal = goal_row[0] if goal_row else ""
-            
-            con.execute("""
-                INSERT INTO post_mortems (session_id, original_goal, perfect_prompt, summary)
-                VALUES (?, ?, ?, ?)
-            """, [st.session_state.session_id, original_goal, refined, "Demo completion"])
+            session_status = goal_row[1] if goal_row and len(goal_row) > 1 else ""
+
+            # End-screenshot validation: "Is what was asked achieved?"
+            validation_result = None
+            if session_status == "success" and st.session_state.get("latest_screenshot") and os.path.exists(st.session_state.latest_screenshot):
+                if "validation_result" not in st.session_state:
+                    user_env = get_user_environment(st.session_state.get("user_browser", ""))
+                    st.session_state.validation_result = validate_goal_achieved(
+                        original_goal, st.session_state.latest_screenshot, user_env=user_env
+                    )
+                validation_result = st.session_state.get("validation_result")
+                if validation_result is not None:
+                    st.markdown("### End screenshot validation")
+                    if validation_result.get("achieved"):
+                        st.success(f"**Achieved** — {validation_result.get('reason', '')}")
+                    else:
+                        st.error(f"**Not achieved** — {validation_result.get('reason', '')}")
+                else:
+                    st.caption("Validation skipped (API unavailable or error).")
+
+            refined = generate_refined_prompt(con, st.session_state.session_id)
+            st.markdown("### Optimized Prompt for Next Time")
+            st.code(refined, language="markdown")
+
+            # Save to post_mortems once (include validation if we have it)
+            val_achieved = str(validation_result.get("achieved")) if validation_result else None
+            val_reason = validation_result.get("reason") if validation_result else None
+            existing = con.execute(
+                "SELECT 1 FROM post_mortems WHERE session_id = ? LIMIT 1",
+                [st.session_state.session_id],
+            ).fetchone()
+            if not existing:
+                con.execute("""
+                    INSERT INTO post_mortems (session_id, original_goal, perfect_prompt, summary, validation_achieved, validation_reason)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, [st.session_state.session_id, original_goal, refined, "Demo completion", val_achieved, val_reason])
             con.close()
             
             if st.button("Start New Session"):
