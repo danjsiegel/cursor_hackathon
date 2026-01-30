@@ -226,6 +226,8 @@ def main():
         st.session_state.current_thought = ""
     if 'latest_screenshot' not in st.session_state:
         st.session_state.latest_screenshot = None
+    if 'is_running' not in st.session_state:
+        st.session_state.is_running = False
     
     # Left Sidebar: Attempt N / max M (eval cycle; no fixed 10-step)
     with st.sidebar:
@@ -233,7 +235,7 @@ def main():
         max_s = st.session_state.get("max_steps", 10)
         step = st.session_state.get("step_number", 0)
         st.metric("Attempt", f"{step} / {max_s}")
-        if st.session_state.session_id and step > 0 and step <= max_s:
+        if st.session_state.get("is_running") and st.session_state.get("session_id") and step > 0 and step <= max_s:
             st.markdown("""
             <style>
             @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
@@ -243,7 +245,7 @@ def main():
             """, unsafe_allow_html=True)
         st.divider()
         st.markdown("### Session Info")
-        if st.session_state.session_id:
+        if st.session_state.get("session_id"):
             st.text(f"Session: {str(st.session_state.session_id)[:8]}...")
     
     # Main Area: Live Screenshot + Thought
@@ -270,7 +272,7 @@ def main():
         goal_input = st.text_area("Enter your goal:", placeholder="Open Calculator and type 'Hello World'", height=100)
         max_steps_input = st.number_input("Max attempts (retry cap)", min_value=1, max_value=100, value=10, help="Stop after this many steps or when agent returns SUCCESS/LOST.")
         
-        start_btn = st.button("Start Task", type="primary", disabled=st.session_state.session_id is not None)
+        start_btn = st.button("Start Task", type="primary", disabled=st.session_state.get("is_running"))
         
         if start_btn and goal_input:
             # Initialize DB
@@ -283,6 +285,7 @@ def main():
             st.session_state.max_steps = max_steps_input
             st.session_state.history = []
             st.session_state.current_thought = "Session started..."
+            st.session_state.is_running = True
             
             con = get_connection()
             con.execute(
@@ -302,7 +305,7 @@ def main():
         st.markdown("---")
         st.markdown("### DuckDB Audit Log")
         
-        if st.session_state.session_id:
+        if st.session_state.get("session_id"):
             con = get_connection()
             logs = con.execute("""
                 SELECT step_number, thought, status, outcome, created_at
@@ -326,7 +329,7 @@ def main():
     
     # Loop: run until SUCCESS, LOST, or step_number >= max_steps (eval / decide in agent)
     max_steps = st.session_state.get("max_steps", 10)
-    if st.session_state.session_id and st.session_state.step_number <= max_steps:
+    if st.session_state.get("is_running") and st.session_state.get("session_id") and st.session_state.step_number <= max_steps:
         # Capture before screenshot
         screenshot_path = f"{SCREENSHOTS_DIR}/{st.session_state.session_id}/step_{st.session_state.step_number}_before.png"
         screenshot, _ = capture_screenshot(screenshot_path)
@@ -394,12 +397,14 @@ def main():
             
             if status == "SUCCESS":
                 st.session_state.step_number = max_steps + 1  # signal done
+                st.session_state.is_running = False
                 con = get_connection()
                 con.execute("UPDATE sessions SET status = ? WHERE id = ?", ["success", st.session_state.session_id])
                 con.close()
                 st.success("Task completed successfully!")
             elif status == "LOST":
                 st.session_state.step_number = max_steps + 1  # signal done (stuck)
+                st.session_state.is_running = False
                 con = get_connection()
                 con.execute("UPDATE sessions SET status = ? WHERE id = ?", ["stuck", st.session_state.session_id])
                 con.close()
@@ -407,6 +412,7 @@ def main():
             else:
                 st.session_state.step_number += 1
                 if st.session_state.step_number > max_steps:
+                    st.session_state.is_running = False
                     con = get_connection()
                     con.execute("UPDATE sessions SET status = ? WHERE id = ?", ["lost", st.session_state.session_id])
                     con.close()
@@ -416,14 +422,14 @@ def main():
     
     # Completion: Self-Improvement (when SUCCESS, LOST/stuck, or max_steps reached)
     max_s = st.session_state.get("max_steps", 10)
-    done = st.session_state.session_id and (
+    done = st.session_state.get("is_running") and st.session_state.get("session_id") and (
         st.session_state.step_number > max_s or st.session_state.step_number == max_s + 1
     )
     if done:
         st.markdown("---")
         st.subheader("Task Completed - Self-Improvement")
         
-        if st.session_state.session_id:
+        if st.session_state.get("session_id"):
             con = get_connection()
             refined = generate_refined_prompt(con, st.session_state.session_id)
             
