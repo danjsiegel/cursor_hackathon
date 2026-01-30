@@ -1,0 +1,15 @@
+# Environment
+.env
+.venv
+venv/
+__pycache__/
+*.pyc
+.python-version
+
+# Data (local DuckDB and screenshots)
+data/
+
+# IDE / OS
+.idea/
+.DS_Store
+*.swp

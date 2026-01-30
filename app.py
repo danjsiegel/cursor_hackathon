@@ -9,6 +9,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple, Union
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import duckdb
 import pyautogui
 import streamlit as st
@@ -20,6 +24,10 @@ from PIL import Image
 DATA_DIR = Path("data")
 DB_PATH = DATA_DIR / "universal_tasker.duckdb"
 SCREENSHOTS_DIR = DATA_DIR / "screenshots"
+
+# MiniMax: use stub when no API key (copy .env.example to .env and set MINIMAX_API_KEY for real API)
+MINIMAX_API_KEY = os.getenv("MINIMAX_API_KEY")
+USE_MINIMAX_STUB = os.getenv("USE_MINIMAX_STUB", "true").lower() in ("true", "1", "yes") or not MINIMAX_API_KEY
 
 # -----------------------------------------------------------------------------
 # DuckDB Schema and Initialization
@@ -119,22 +127,22 @@ def capture_screenshot(save_path: Optional[str] = None) -> Tuple[Optional[Image.
         return None, "screenshot_failed"
 
 # -----------------------------------------------------------------------------
-# MiniMax API Stub (MVP - replace with real API later)
+# MiniMax API (stub when USE_MINIMAX_STUB or no MINIMAX_API_KEY; real API when key set)
 # -----------------------------------------------------------------------------
 def analyze_screenshot(screenshot_path: str, goal: str, history: list) -> dict:
     """
-    Analyze screenshot and determine next action (stub implementation).
+    Analyze screenshot and determine next action.
     
-    Args:
-        screenshot_path: Path to the screenshot file
-        goal: The user's goal
-        history: List of previous actions/results
+    Uses stub when USE_MINIMAX_STUB=true or MINIMAX_API_KEY is unset.
+    Set MINIMAX_API_KEY in .env and USE_MINIMAX_STUB=false for real MiniMax API.
     
     Returns:
         dict with keys: thought, code, status
     """
-    # Demo stub: Open Calculator and type "Hello World"
-    # In production, this would call MiniMax API with base64-encoded image
+    if not USE_MINIMAX_STUB and MINIMAX_API_KEY:
+        # TODO: call MiniMax API with base64-encoded image, goal, history
+        pass
+    # Stub: Open Calculator and type "Hello World"
     
     step_num = len(history) + 1
     
