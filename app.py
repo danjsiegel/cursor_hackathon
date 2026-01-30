@@ -45,15 +45,21 @@ def init_db():
     """Initialize DuckDB schema with all required tables."""
     con = get_connection()
     
-    # Sessions table
+    # Sessions table (max_steps = retry cap; process ends on SUCCESS, LOST, or step >= max_steps)
     con.execute("""
         CREATE TABLE IF NOT EXISTS sessions (
             id UUID PRIMARY KEY,
             goal VARCHAR,
             status VARCHAR DEFAULT 'running',
+            max_steps INTEGER DEFAULT 10,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # Backfill max_steps for existing tables
+    try:
+        con.execute("ALTER TABLE sessions ADD COLUMN max_steps INTEGER DEFAULT 10")
+    except Exception:
+        pass
     
     # Plan steps table
     con.execute("""
@@ -212,6 +218,8 @@ def main():
         st.session_state.session_id = None
     if 'step_number' not in st.session_state:
         st.session_state.step_number = 0
+    if 'max_steps' not in st.session_state:
+        st.session_state.max_steps = 10
     if 'history' not in st.session_state:
         st.session_state.history = []
     if 'current_thought' not in st.session_state:
@@ -219,34 +227,20 @@ def main():
     if 'latest_screenshot' not in st.session_state:
         st.session_state.latest_screenshot = None
     
-    # Left Sidebar: 10-Step Checklist
+    # Left Sidebar: Attempt N / max M (eval cycle; no fixed 10-step)
     with st.sidebar:
-        st.title("10-Step Checklist")
-        st.markdown("### Session Progress")
-        
-        for i in range(1, 11):
-            if i < st.session_state.step_number:
-                st.success(f"Step {i}: Completed")
-            elif i == st.session_state.step_number:
-                st.info(f"Step {i}: **ACTIVE** (pulsing)")
-                # Add pulsing animation via HTML/CSS
-                st.markdown("""
-                <style>
-                @keyframes pulse {
-                    0% { opacity: 1; }
-                    50% { opacity: 0.5; }
-                    100% { opacity: 1; }
-                }
-                .pulsing {
-                    animation: pulse 1s infinite;
-                    color: #FF4B4B;
-                }
-                </style>
-                <span class="pulsing">● Processing...</span>
-                """, unsafe_allow_html=True)
-            else:
-                st.text(f"Step {i}: Pending")
-        
+        st.title("Session Progress")
+        max_s = st.session_state.get("max_steps", 10)
+        step = st.session_state.get("step_number", 0)
+        st.metric("Attempt", f"{step} / {max_s}")
+        if st.session_state.session_id and step > 0 and step <= max_s:
+            st.markdown("""
+            <style>
+            @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+            .pulsing { animation: pulse 1s infinite; color: #FF4B4B; }
+            </style>
+            <span class="pulsing">● Running...</span>
+            """, unsafe_allow_html=True)
         st.divider()
         st.markdown("### Session Info")
         if st.session_state.session_id:
@@ -274,6 +268,7 @@ def main():
     with col2:
         st.subheader("Goal")
         goal_input = st.text_area("Enter your goal:", placeholder="Open Calculator and type 'Hello World'", height=100)
+        max_steps_input = st.number_input("Max attempts (retry cap)", min_value=1, max_value=100, value=10, help="Stop after this many steps or when agent returns SUCCESS/LOST.")
         
         start_btn = st.button("Start Task", type="primary", disabled=st.session_state.session_id is not None)
         
@@ -285,13 +280,14 @@ def main():
             session_id = str(uuid.uuid4())
             st.session_state.session_id = session_id
             st.session_state.step_number = 1
+            st.session_state.max_steps = max_steps_input
             st.session_state.history = []
             st.session_state.current_thought = "Session started..."
             
             con = get_connection()
             con.execute(
-                "INSERT INTO sessions (id, goal, status) VALUES (?, ?, ?)",
-                [session_id, goal_input, "running"]
+                "INSERT INTO sessions (id, goal, status, max_steps) VALUES (?, ?, ?, ?)",
+                [session_id, goal_input, "running", max_steps_input]
             )
             con.close()
             
@@ -328,8 +324,9 @@ def main():
         else:
             st.text("Start a session to see logs.")
     
-    # Demo Loop Execution (automatic for MVP)
-    if st.session_state.session_id and st.session_state.step_number <= 10:
+    # Loop: run until SUCCESS, LOST, or step_number >= max_steps (eval / decide in agent)
+    max_steps = st.session_state.get("max_steps", 10)
+    if st.session_state.session_id and st.session_state.step_number <= max_steps:
         # Capture before screenshot
         screenshot_path = f"{SCREENSHOTS_DIR}/{st.session_state.session_id}/step_{st.session_state.step_number}_before.png"
         screenshot, _ = capture_screenshot(screenshot_path)
@@ -396,17 +393,33 @@ def main():
             st.session_state.latest_screenshot = after_screenshot_path
             
             if status == "SUCCESS":
-                st.session_state.step_number = 11  # Complete
+                st.session_state.step_number = max_steps + 1  # signal done
+                con = get_connection()
+                con.execute("UPDATE sessions SET status = ? WHERE id = ?", ["success", st.session_state.session_id])
+                con.close()
                 st.success("Task completed successfully!")
+            elif status == "LOST":
+                st.session_state.step_number = max_steps + 1  # signal done (stuck)
+                con = get_connection()
+                con.execute("UPDATE sessions SET status = ? WHERE id = ?", ["stuck", st.session_state.session_id])
+                con.close()
+                st.warning("Agent reported stuck (LOST). Stopping.")
             else:
                 st.session_state.step_number += 1
+                if st.session_state.step_number > max_steps:
+                    con = get_connection()
+                    con.execute("UPDATE sessions SET status = ? WHERE id = ?", ["lost", st.session_state.session_id])
+                    con.close()
+                    st.warning(f"Max attempts ({max_steps}) reached. Stopping.")
             
             st.rerun()
     
-    # Completion: Self-Improvement
-    if st.session_state.step_number > 10 or (
-        st.session_state.session_id and st.session_state.step_number == 11
-    ):
+    # Completion: Self-Improvement (when SUCCESS, LOST/stuck, or max_steps reached)
+    max_s = st.session_state.get("max_steps", 10)
+    done = st.session_state.session_id and (
+        st.session_state.step_number > max_s or st.session_state.step_number == max_s + 1
+    )
+    if done:
         st.markdown("---")
         st.subheader("Task Completed - Self-Improvement")
         

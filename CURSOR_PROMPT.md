@@ -60,7 +60,7 @@ uv run streamlit run app.py
 **Current Status:**
 - P0 complete: UV init, DuckDB schema, screenshot utility, MiniMax stub, Streamlit shell, demo loop
 - P1 pending: Full MiniMax API integration, PAUSED status for human review
-- P2 pending: Dynamic 10-step plan generation
+- Max steps / eval cycle: configurable retry cap; agent can return LOST ("I'm stuck"); no fixed 10-step plan
 
 **Hackathon Deadline Context:**
 - Time-boxed to 5 hours
