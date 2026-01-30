@@ -1,126 +1,134 @@
-# Universal Tasker (Cursor Hackathon)
+# Universal Tasker
 
-Autonomous UI agent: prompt a goal, it takes screenshots, calls MiniMax for next steps, runs pyautogui code, and verifies each step. Results and audit log live in DuckDB.
+**Autonomous UI automation powered by vision + language models.**
+
+Give it a goal in plain English. It sees your screen, reasons about what to do, executes actions, and verifies each step—all without writing scripts or recording macros.
+
+## The Vision
+
+Traditional automation requires:
+- Writing scripts for each task
+- Maintaining brittle selectors that break when UIs change
+- Different tools for different platforms
+
+**Universal Tasker** is different:
+- **Natural language goals**: "Open Calculator and add 3+3" or "Fill out the patient billing form"
+- **Vision-based reasoning**: Sees the screen like a human would
+- **Self-verifying**: Checks if each step actually worked
+- **Platform agnostic**: Works with any UI—thick clients, legacy apps, web apps, desktop software
+
+### Use Cases
+
+| Domain | Example |
+|--------|---------|
+| **Healthcare** | Automate billing workflows in legacy EMR systems |
+| **Finance** | Process invoices across multiple vendor portals |
+| **IT Support** | Guided troubleshooting with automatic verification |
+| **Data Entry** | Transfer data between systems that don't integrate |
+| **Testing** | Exploratory UI testing with natural language test cases |
+| **Accessibility** | Voice-controlled computer operation for users with disabilities |
+
+## How It Works
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│  1. Screenshot  │────▶│  2. AI Reasons  │────▶│  3. Execute     │
+│  Capture screen │     │  "I see X, I'll │     │  pyautogui runs │
+│  state          │     │   do Y"         │     │  the action     │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
+                                                        │
+┌─────────────────┐     ┌─────────────────┐             │
+│  5. Repeat or   │◀────│  4. Verify      │◀────────────┘
+│  Complete       │     │  "Did it work?" │
+└─────────────────┘     └─────────────────┘
+```
+
+1. **Screenshot** → Capture current screen state
+2. **Reason** → MiniMax vision model analyzes screenshot + goal
+3. **Execute** → Run pyautogui code to perform the action
+4. **Verify** → AI checks if the step achieved its intent
+5. **Repeat** → Continue until goal is achieved or stuck
 
 ## Quick Start
 
 ```bash
+git clone <repo>
 cd cursor_hackathon
-cp .env.example .env          # Add your MINIMAX_API_KEY here
+
+# Install dependencies
 uv sync
+
+# Configure API (get key from https://platform.minimax.io)
+cp .env.example .env
+# Edit .env: MINIMAX_API_KEY=your_key, USE_MINIMAX_STUB=false
+
+# Run
 uv run streamlit run app.py
 ```
 
-Open http://localhost:8501 and enter a goal like "Open Calculator and add 3+3".
+Open http://localhost:8501 and try: **"Open Calculator and add 3+3"**
 
-## Setup
+## Features
 
-1. **Install dependencies**
-   ```bash
-   uv sync
-   ```
+- **Session-based UI**: Track progress, view history, audit failures
+- **Step verification**: AI confirms each action worked before proceeding
+- **Graceful failures**: Stops and explains when stuck instead of thrashing
+- **Audit log**: Every step recorded in DuckDB for debugging and learning
+- **Dynamic planning**: Agent estimates steps needed, adjusts as it goes
+- **Self-improvement**: Post-mortem analysis generates better prompts
 
-2. **Configure API (optional)**
-   ```bash
-   cp .env.example .env
-   # Edit .env and set MINIMAX_API_KEY=your_key
-   # Set USE_MINIMAX_STUB=false to use real API
-   ```
+## macOS Setup
 
-3. **Grant macOS permissions** (required for automation)
-   - See [Troubleshooting](#troubleshooting-macos-permissions) below
-
-4. **Run the app**
-   ```bash
-   uv run streamlit run app.py
-   ```
-
-## Usage
-
-1. Enter a **goal** (e.g. "Open Calculator and add 3+3")
-2. Optionally set **Your browser** (e.g. Firefox) for context
-3. Click **Start Task**
-
-The agent will:
-- Take a screenshot
-- Send it to MiniMax for reasoning
-- Execute the returned pyautogui code
-- Verify each step
-- Repeat until done or stuck
-
-## Modes
-
-- **Stub (default):** No API key needed. Uses demo steps. Good for testing UI.
-- **Live API:** Set `MINIMAX_API_KEY` and `USE_MINIMAX_STUB=false` in `.env`.
-
-## Troubleshooting (macOS Permissions)
-
-**Symptom:** Steps report "Pass" but nothing happens on screen (no Spotlight, no Calculator, no typing).
-
-**Cause:** macOS requires explicit permission for apps to control keyboard and mouse.
-
-### Run the Diagnostic Script
-
-```bash
-uv run python scripts/diagnose_pyautogui.py
-```
-
-This interactive script tests mouse, clicks, and keyboard to identify exactly what's broken.
-
-### Grant Permissions
+pyautogui requires permissions to control the computer:
 
 1. **System Settings → Privacy & Security → Accessibility**
-   - Add **Terminal** (if running from Terminal)
-   - Add **Cursor** (if running from Cursor's terminal)
-   - Toggle ON
+   - Add Terminal (or Cursor) → Toggle ON
 
-2. **System Settings → Privacy & Security → Input Monitoring** (macOS Catalina+)
-   - Add the same apps as above
-   - Toggle ON
-   - **This is often the missing piece!** Mouse works without it, but keyboard doesn't.
+2. **System Settings → Privacy & Security → Input Monitoring**
+   - Add Terminal (or Cursor) → Toggle ON
 
 3. **Restart Terminal/Cursor** after granting permissions
 
-4. **Check "Secure Keyboard Entry"** is disabled:
-   - Terminal menu → Edit → Uncheck "Secure Keyboard Entry"
-   - Some password managers enable this and block all keyboard automation
+Run the diagnostic to verify: `uv run python scripts/diagnose_pyautogui.py`
 
-5. **Try running from regular Terminal** instead of Cursor's integrated terminal
-
-### Still Not Working?
-
-- **Close password managers** (1Password, etc.) - they can enable Secure Input
-- **Check Spotlight shortcut**: System Settings → Keyboard → Keyboard Shortcuts → Spotlight
-- **Try a different terminal app**: iTerm2, Terminal.app, Warp
-- **Reboot** after permission changes
-
-## Project Layout
+## Architecture
 
 ```
 cursor_hackathon/
-├── app.py                    # Main Streamlit app
-├── pyautogui_check.py        # Display control check
-├── task_translator.py        # Rule-based thought→code fallback
-├── prompts/                  # System prompt templates
-│   ├── main_agent_system.txt
-│   ├── main_agent_first_step_extra.txt
-│   └── ...
+├── app.py                      # Streamlit UI + orchestration
+├── pyautogui_check.py          # Permission diagnostics
+├── task_translator.py          # Rule-based code generation fallback
+├── prompts/                    # LLM prompt templates
+│   ├── main_agent_system.txt   # Core agent instructions
+│   ├── verify_step_*.txt       # Step verification prompts
+│   └── validate_goal_*.txt     # Goal completion prompts
 ├── scripts/
-│   ├── diagnose_pyautogui.py # Diagnostic script for permissions
-│   └── analyze_audit_log.py  # Export audit log to rules
-├── data/                     # (gitignored) DuckDB, screenshots
-└── .env                      # (gitignored) API keys
+│   ├── diagnose_pyautogui.py   # Interactive permission tester
+│   └── analyze_audit_log.py    # Export audit data for learning
+└── data/                       # (gitignored) DuckDB, screenshots
 ```
 
-## How It Works
+## Technical Details
 
-1. **Screenshot** → Capture current screen state
-2. **MiniMax API** → Send screenshot + goal, get thought + code + status
-3. **Execute** → Run pyautogui code via `exec()`
-4. **Verify** → Ask MiniMax "did the step achieve what was intended?"
-5. **Repeat** → Until SUCCESS, LOST, or step limit
+- **Vision Model**: MiniMax M2.1 (multimodal, sees screenshots)
+- **Execution**: pyautogui for cross-platform mouse/keyboard control
+- **Storage**: DuckDB for sessions, audit logs, post-mortems
+- **UI**: Streamlit for rapid prototyping
+- **Prompts**: Template-based with dynamic context injection
 
-The agent uses Spotlight (Cmd+Space) to open apps reliably, and prefers keyboard input over mouse clicks for determinism.
+## Limitations & Future Work
+
+**Current limitations:**
+- Focus management on macOS can be tricky (browser captures shortcuts)
+- Coordinate-based clicking is fragile across screen sizes
+- Single-user, single-machine (no remote execution yet)
+
+**Future directions:**
+- **Element detection**: Use vision to identify clickable elements by appearance
+- **Multi-monitor support**: Handle complex display setups
+- **Workflow learning**: Learn from successful runs to skip AI calls
+- **Remote execution**: Control machines over the network
+- **Voice input**: Combine with speech-to-text for hands-free operation
 
 ## Contributing
 
@@ -133,3 +141,7 @@ The agent uses Spotlight (Cmd+Space) to open apps reliably, and prefers keyboard
 ## License
 
 MIT
+
+---
+
+*Built at the Cursor Hackathon 2026*

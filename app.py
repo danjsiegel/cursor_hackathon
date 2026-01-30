@@ -1083,19 +1083,6 @@ def main():
             _run_globals["time"] = __import__("time")
             try:
                 print(f"[EXEC] pyautogui.PAUSE = {pyautogui.PAUSE}, executing now...")
-                # WORKAROUND: Use AppleScript to activate Finder first
-                # This ensures the browser doesn't capture keyboard shortcuts like Cmd+Space
-                import subprocess
-                try:
-                    print("[EXEC] Activating Finder via AppleScript to ensure system focus...")
-                    subprocess.run(
-                        ['osascript', '-e', 'tell application "Finder" to activate'],
-                        timeout=2,
-                        capture_output=True
-                    )
-                    _run_globals["time"].sleep(0.3)
-                except Exception as e:
-                    print(f"[EXEC] AppleScript failed (continuing anyway): {e}")
                 print("[EXEC] Now executing user code...")
                 exec(code_to_run, _run_globals)
                 print("[EXEC] Code executed successfully.")
