@@ -1,6 +1,6 @@
 # Universal Tasker
 
-|**Autonomous UI automation powered by MiniMax vision AI.**|
+**Autonomous UI automation powered by MiniMax vision AI.**
 
 > Give it a goal in plain English. It sees your screen, reasons about what to do, executes real actions, and verifies each step—no scripts, no selectors, just goals.
 
