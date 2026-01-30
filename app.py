@@ -24,6 +24,7 @@ import streamlit as st
 from PIL import Image
 
 from prompts import format_prompt, load as load_prompt
+from task_translator import translate_task_to_code as translate_task_rules
 
 # -----------------------------------------------------------------------------
 # Configuration
@@ -646,6 +647,10 @@ def main():
         st.session_state.checkpoints = []  # step numbers to take validation screenshot
     if 'user_browser' not in st.session_state:
         st.session_state.user_browser = ""  # optional: "Firefox", "Chrome", etc. for prompt context
+    if 'session_log' not in st.session_state:
+        st.session_state.session_log = []  # chat-like activity: [{ "message", "step", "ts" }]
+    if 'view_session_id' not in st.session_state:
+        st.session_state.view_session_id = None  # when set, main area shows that session's full log
 
     # Left Sidebar: Attempt N / max M (eval cycle; no fixed 10-step)
     with st.sidebar:
@@ -689,6 +694,9 @@ def main():
                 with st.expander(label, expanded=False):
                     st.markdown(f"**Goal:** {goal or '(none)'}")
                     st.caption(f"Status: {status} · {created_str}")
+                    if st.button("View full log", key=f"view_{sid}", type="secondary"):
+                        st.session_state.view_session_id = str(sid)
+                        st.rerun()
                     con = get_connection()
                     try:
                         logs = con.execute("""
@@ -730,8 +738,76 @@ def main():
         else:
             st.caption("No sessions yet. Start a task to see history here.")
     
-    # Main Area: Live Screenshot + Thought
+    # Main Area: Session activity (chat-like) + Live Screenshot + Thought
     st.title("The Universal Tasker")
+
+    # Viewing an older session: show its full log and "Back to current"
+    if st.session_state.get("view_session_id"):
+        vsid = st.session_state.view_session_id
+        if st.button("← Back to current session"):
+            st.session_state.view_session_id = None
+            st.rerun()
+        st.subheader(f"Session {str(vsid)[:8]}…")
+        init_db()
+        con = get_connection()
+        try:
+            row = con.execute(
+                "SELECT goal, status, created_at FROM sessions WHERE id = ?", [str(vsid)]
+            ).fetchone()
+            if row:
+                goal, status, created = row[0], row[1], row[2]
+                st.caption(f"Goal: {goal or '(none)'} · Status: {status} · {created}")
+            logs = con.execute("""
+                SELECT step_number, thought, code, status, outcome, step_verification_achieved, step_verification_reason, feedback
+                FROM audit_log WHERE session_id = ? ORDER BY step_number
+            """, [str(vsid)]).fetchall()
+        finally:
+            con.close()
+
+        if logs:
+            for row in logs:
+                step_n, thought, code, step_status, outcome, ver_ok, ver_reason, feedback = (
+                    row[0], row[1], row[2], row[3], row[4],
+                    row[5] if len(row) > 5 else None,
+                    row[6] if len(row) > 6 else None,
+                    row[7] if len(row) > 7 else None,
+                )
+                with st.expander(f"Step {step_n} — {step_status} — {outcome}", expanded=(outcome == "Fail" or step_n == len(logs))):
+                    st.markdown("**Thought**")
+                    st.text(thought or "—")
+                    if code:
+                        st.markdown("**Code**")
+                        st.code(code, language="python")
+                    if ver_reason:
+                        st.caption(f"Step verification: {ver_ok} — {ver_reason}")
+                    if feedback:
+                        st.error(feedback)
+            # Stuck summary
+            last = logs[-1]
+            last_status, last_outcome = last[3], last[4]
+            if last_status in ("LOST", "error") or last_outcome == "Fail" or (last[5] is not None and str(last[5]).lower() == "false"):
+                st.error("**Stuck / failed**")
+                stuck_msg = last[7] or last[6] or f"Last step: {last_status} — {last_outcome}"
+                st.markdown(stuck_msg)
+        else:
+            st.info("No step log for this session.")
+        st.stop()
+
+    # Current session: show activity log (chat-like) then screenshot/thought
+    st.subheader("Session activity")
+    session_log = st.session_state.get("session_log") or []
+    if session_log:
+        log_container = st.container()
+        with log_container:
+            for entry in session_log:
+                msg = entry.get("message", "")
+                step = entry.get("step")
+                prefix = f"**Step {step}** " if step else ""
+                st.markdown(f"{prefix}{msg}")
+        st.divider()
+    else:
+        st.caption("Activity will appear here after you start a task.")
+        st.divider()
     
     col1, col2 = st.columns([3, 1])
     
@@ -776,7 +852,11 @@ def main():
             st.session_state.is_running = True
             st.session_state.planned_total_steps = None
             st.session_state.checkpoints = []
-            
+            st.session_state.session_log = [
+                {"message": f"Session started. Goal: {goal_input[:80]}{'…' if len(goal_input) > 80 else ''}", "step": None, "ts": datetime.now().isoformat()},
+            ]
+            st.session_state.view_session_id = None
+
             con = get_connection()
             con.execute(
                 "INSERT INTO sessions (id, goal, status, max_steps) VALUES (?, ?, ?, ?)",
@@ -827,20 +907,36 @@ def main():
     
     # Loop: run until SUCCESS, LOST, or step_number >= max_steps (eval / decide in agent)
     max_steps = st.session_state.get("max_steps", 10)
-    if st.session_state.get("is_running") and st.session_state.get("session_id") and st.session_state.step_number <= max_steps:
-        # Capture before screenshot
-        screenshot_path = f"{SCREENSHOTS_DIR}/{st.session_state.session_id}/step_{st.session_state.step_number}_before.png"
-        screenshot, _ = capture_screenshot(screenshot_path)
-        
-        if screenshot:
+    step_n = st.session_state.get("step_number", 0)
+
+    def _log(msg: str, step: Optional[int] = None) -> None:
+        (st.session_state.setdefault("session_log", [])).append(
+            {"message": msg, "step": step, "ts": datetime.now().isoformat()}
+        )
+
+    if st.session_state.get("is_running") and st.session_state.get("session_id") and step_n <= max_steps:
+        _log(f"Step {step_n}: Capturing screenshot…", step_n)
+        screenshot_path = f"{SCREENSHOTS_DIR}/{st.session_state.session_id}/step_{step_n}_before.png"
+        screenshot, screenshot_feedback = capture_screenshot(screenshot_path)
+        _log("Screenshot captured.", step_n)
+
+        if not screenshot:
+            st.session_state.is_running = False
+            con = get_connection()
+            con.execute("UPDATE sessions SET status = ? WHERE id = ?", ["error", st.session_state.session_id])
+            con.close()
+            st.error(f"Screenshot failed: {screenshot_feedback or 'No image'}. Stopping. You can start a new task.")
+            st.rerun()
+
+        try:
             # Get goal
             con = get_connection()
             goal_row = con.execute(
                 "SELECT goal FROM sessions WHERE id = ?", [st.session_state.session_id]
             ).fetchone()
             goal = goal_row[0] if goal_row else ""
-            
-            # Call MiniMax (or stub) with user context (OS, browser)
+
+            _log("Uploading to MiniMax, getting next steps…", step_n)
             user_env = get_user_environment(st.session_state.get("user_browser", ""))
             result = analyze_screenshot(
                 screenshot_path, goal, st.session_state.history, user_env=user_env
@@ -849,10 +945,15 @@ def main():
             thought = result["thought"]
             code = result["code"]
             status = result["status"]
+            _log(f"Got steps: thought={(thought or '')[:60]}… status={status}", step_n)
 
-            # If agent returned no code (or "pass"), translate step description into code
+            # If agent returned no code (or "pass"), translate step description into code:
+            # try rule-based translator first (DuckDB-backed / giant if-else), then API
             if (not code or code.strip() in ("", "pass")) and (thought or "").strip():
-                translated = translate_step_to_code(thought, user_env)
+                _log("Translating steps (rule-based or API).", step_n)
+                translated = translate_task_rules(thought, user_env)
+                if not translated:
+                    translated = translate_step_to_code(thought, user_env)
                 if translated:
                     code = translated
 
@@ -864,12 +965,15 @@ def main():
                 if result.get("checkpoints"):
                     st.session_state.checkpoints = list(result["checkpoints"])
             
+            _log("Doing steps (executing code).", step_n)
             # Execute the action (pyautogui). On failure: error out, do not continue.
             try:
                 exec(code)
                 outcome = "Pass"
                 feedback = None
+                _log("Step done. Outcome: Pass.", step_n)
             except Exception as e:
+                _log(f"Step failed: {str(e)[:80]}", step_n)
                 outcome = "Fail"
                 feedback = str(e)
                 # Capture after screenshot even on failure (for audit)
@@ -911,7 +1015,9 @@ def main():
             if step_verification is not None:
                 step_ver_achieved = str(step_verification.get("achieved", False))
                 step_ver_reason = step_verification.get("reason", "")
-                if not step_verification.get("achieved", True):
+                achieved = step_verification.get("achieved", True)
+                _log(f"Step verification: {'achieved' if achieved else 'not achieved'} — {step_ver_reason[:80]}", step_n)
+                if not achieved:
                     outcome = "Fail"
                     feedback = f"Step verification: {step_ver_reason}"
                     con = get_connection()
@@ -1004,6 +1110,16 @@ def main():
                     con.close()
                     st.warning(f"Max attempts ({max_steps}) reached. Stopping.")
             
+            st.rerun()
+        except Exception as e:
+            st.session_state.is_running = False
+            try:
+                con = get_connection()
+                con.execute("UPDATE sessions SET status = ? WHERE id = ?", ["error", st.session_state.session_id])
+                con.close()
+            except Exception:
+                pass
+            st.error(f"Task failed: {e}. Stopping. You can start a new task.")
             st.rerun()
     
     # Completion: Self-Improvement (when SUCCESS, LOST/stuck, or max_steps reached)
