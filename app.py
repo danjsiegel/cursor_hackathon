@@ -677,143 +677,59 @@ def main():
         st.session_state.pyautogui_control_ok = _ok
         st.session_state.pyautogui_control_message = _msg or ""
 
-    # Left Sidebar: Attempt N / max M (eval cycle; no fixed 10-step)
+    # Left Sidebar
     with st.sidebar:
+        st.markdown("### 🤖 System Status")
         if st.session_state.get("pyautogui_control_ok", True):
-            st.success("Automation: good to go")
+            st.success("✓ Ready to automate")
         else:
-            st.warning(st.session_state.get("pyautogui_control_message", "Automation may not control the display."))
-        col_chk, col_tst = st.columns(2)
-        with col_chk:
-            if st.button("Re-check", help="Run the pyautogui display check again (e.g. after granting Accessibility)."):
-                _ok, _msg = check_pyautogui_control()
-                st.session_state.pyautogui_control_ok = _ok
-                st.session_state.pyautogui_control_message = _msg or ""
-                st.rerun()
-        with col_tst:
-            if st.button("Test click", help="Perform a test click at the current mouse position to verify clicks work."):
-                _ok, _msg = test_click_works()
-                if _ok:
-                    st.success("Click works!")
-                else:
-                    st.error(_msg or "Click test failed.")
-        with st.expander("🔧 Permissions Help", expanded=not st.session_state.get("pyautogui_control_ok", True)):
-            st.markdown(get_permission_help())
-        st.title("Session Progress")
+            st.error("⚠️ Permissions needed")
+            with st.expander("Fix permissions"):
+                st.markdown(get_permission_help())
+        
+        if st.button("🔄 Re-check", use_container_width=True):
+            _ok, _msg = check_pyautogui_control()
+            st.session_state.pyautogui_control_ok = _ok
+            st.session_state.pyautogui_control_message = _msg or ""
+            st.rerun()
+        
+        st.divider()
+        
+        # Progress
         max_s = st.session_state.get("max_steps", 10)
         step = st.session_state.get("step_number", 0)
-        st.metric("Attempt", f"{step} / {max_s}")
-        if st.session_state.get("is_running") and st.session_state.get("session_id") and step > 0 and step <= max_s:
-            st.markdown("""
-            <style>
-            @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
-            .pulsing { animation: pulse 1s infinite; color: #FF4B4B; }
-            </style>
-            <span class="pulsing">● Running...</span>
-            """, unsafe_allow_html=True)
-        st.divider()
-        st.markdown("### Session Info")
-        if st.session_state.get("session_id"):
-            st.text(f"Session: {str(st.session_state.session_id)[:8]}...")
+        if st.session_state.get("is_running"):
+            st.markdown(f"### ⏳ Running... Step {step}/{max_s}")
+            st.progress(min(step / max_s, 1.0))
+        elif st.session_state.get("session_id"):
+            st.markdown(f"### ✅ Complete ({step} steps)")
 
-        # Historical sessions: expandable list
+        # Historical sessions (compact)
         st.divider()
-        st.markdown("### Historical Sessions")
+        st.markdown("### 📁 History")
         init_db()
-        rows = []
         con = get_connection()
         try:
             rows = con.execute("""
-                SELECT id, goal, status, created_at
-                FROM sessions
-                ORDER BY created_at DESC
-                LIMIT 50
+                SELECT id, goal, status FROM sessions
+                ORDER BY created_at DESC LIMIT 10
             """).fetchall()
         finally:
             con.close()
 
         if rows:
-            for sid, goal, status, created_at in rows:
-                created_str = str(created_at)[:19] if created_at else ""
-                label = f"{str(sid)[:8]}… — {status} — {created_str}"
-                with st.expander(label, expanded=False):
-                    st.markdown(f"**Goal:** {goal or '(none)'}")
-                    st.caption(f"Status: {status} · {created_str}")
-                    if st.button("View full log", key=f"view_{sid}", type="secondary"):
-                        st.session_state.view_session_id = str(sid)
-                        st.rerun()
-                    con = get_connection()
-                    try:
-                        logs = con.execute("""
-                            SELECT step_number, thought, status, outcome, step_verification_achieved, step_verification_reason, created_at
-                            FROM audit_log
-                            WHERE session_id = ?
-                            ORDER BY step_number
-                        """, [str(sid)]).fetchall()
-                        if logs:
-                            st.markdown("**Steps**")
-                            for row in logs:
-                                step, thought, step_status, outcome = row[0], row[1], row[2], row[3]
-                                step_ver_ok = row[4] if len(row) > 4 else None
-                                step_ver_reason = row[5] if len(row) > 5 else None
-                                icon = "✅" if outcome == "Pass" else "❌" if outcome == "Fail" else "⏳"
-                                st.markdown(f"{icon} Step {step} ({step_status})")
-                                st.text(thought or "—")
-                                if step_ver_ok is not None or step_ver_reason:
-                                    ver_icon = "✅" if str(step_ver_ok).lower() == "true" else "❌"
-                                    st.caption(f"Verified {ver_icon}: {step_ver_reason or ''}")
-                        pm = con.execute("""
-                            SELECT original_goal, perfect_prompt, summary, validation_achieved, validation_reason
-                            FROM post_mortems
-                            WHERE session_id = ?
-                            LIMIT 1
-                        """, [str(sid)]).fetchone()
-                        if pm:
-                            st.markdown("**Post-mortem**")
-                            st.caption(pm[2] or "")
-                            st.code(pm[1] or "", language="markdown")
-                            if len(pm) >= 5 and (pm[3] is not None or pm[4]):
-                                st.markdown("**End validation**")
-                                if str(pm[3]).lower() == "true":
-                                    st.success(f"Achieved — {pm[4] or ''}")
-                                else:
-                                    st.error(f"Not achieved — {pm[4] or ''}")
-                    finally:
-                        con.close()
+            for sid, goal, status in rows:
+                status_icon = "✅" if status == "success" else "❌" if status in ("error", "lost") else "⏳"
+                goal_short = (goal[:25] + "…") if goal and len(goal) > 25 else (goal or "—")
+                if st.button(f"{status_icon} {goal_short}", key=f"view_{sid}", use_container_width=True):
+                    st.session_state.view_session_id = str(sid)
+                    st.rerun()
         else:
-            st.caption("No sessions yet. Start a task to see history here.")
+            st.caption("No history yet.")
     
-    # Main Area: Title + Status on top; Goal + Live in middle; Session activity at bottom
-    st.title("The Universal Tasker")
-
-    # Status bar: Waiting | Running | Succeeded | Failed
-    sid = st.session_state.get("session_id")
-    is_running = st.session_state.get("is_running", False)
-    if st.session_state.get("view_session_id"):
-        status_label = "Viewing session"
-        status_color = "blue"
-    elif not sid:
-        status_label = "Waiting"
-        status_color = "gray"
-    elif is_running:
-        status_label = "Running"
-        status_color = "orange"
-    else:
-        init_db()
-        con = get_connection()
-        try:
-            row = con.execute("SELECT status FROM sessions WHERE id = ?", [sid]).fetchone()
-            session_status = row[0] if row else ""
-        finally:
-            con.close()
-        if session_status == "success":
-            status_label = "Succeeded"
-            status_color = "green"
-        else:
-            status_label = "Failed"
-            status_color = "red"
-    st.markdown(f"**Status:** {status_label}")
-    st.divider()
+    # Main Area
+    st.markdown("# 🤖 Universal Tasker")
+    st.caption("Automate any UI with natural language")
 
     # Viewing an older session: show its full log and "Back to current"
     if st.session_state.get("view_session_id"):
@@ -874,34 +790,25 @@ def main():
             st.info("No step log for this session.")
         st.stop()
 
-    # Current session: Goal + Live Observation in middle
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        st.subheader("Live Observation")
-        if st.session_state.latest_screenshot and os.path.exists(st.session_state.latest_screenshot):
-            st.image(st.session_state.latest_screenshot, caption="Latest Screenshot", width="stretch")
-        else:
-            st.info("No screenshot captured yet. Enter a goal and click Start.")
-        if st.session_state.current_thought:
-            st.markdown(f"**Current thought:** {st.session_state.current_thought}")
-    with col2:
-        st.subheader("Goal")
-        goal_input = st.text_area("Enter your goal:", placeholder="Open Calculator and type 'Hello World'", height=100)
-        st.text_input(
-            "Your browser (optional)",
-            placeholder="e.g. Firefox, Chrome, Safari",
-            help="Included in the prompt so the agent knows your environment.",
-            key="user_browser",
+    # Main content area: Goal input + Live observation
+    col_goal, col_live = st.columns([1, 2])
+    
+    with col_goal:
+        goal_input = st.text_area(
+            "What do you want to do?",
+            placeholder="Open Calculator and add 3+3",
+            height=80,
+            label_visibility="visible"
         )
-        max_steps_input = st.number_input("Max attempts (retry cap)", min_value=1, max_value=100, value=10, help="Stop after this many steps or when agent returns SUCCESS/LOST.")
         
-        start_btn = st.button("Start Task", type="primary", disabled=st.session_state.get("is_running"))
+        col_btn, col_max = st.columns([2, 1])
+        with col_btn:
+            start_btn = st.button("▶ Start", type="primary", disabled=st.session_state.get("is_running"), use_container_width=True)
+        with col_max:
+            max_steps_input = st.number_input("Max", min_value=1, max_value=50, value=10, label_visibility="collapsed")
         
         if start_btn and goal_input:
-            # Initialize DB
             init_db()
-            
-            # Create new session
             session_id = str(uuid.uuid4())
             st.session_state.session_id = session_id
             st.session_state.step_number = 1
@@ -912,7 +819,7 @@ def main():
             st.session_state.planned_total_steps = None
             st.session_state.checkpoints = []
             st.session_state.session_log = [
-                {"message": f"Session started. Goal: {goal_input[:80]}{'…' if len(goal_input) > 80 else ''}", "step": None, "ts": datetime.now().isoformat()},
+                {"message": f"**Goal:** {goal_input}", "step": None, "ts": datetime.now().isoformat()},
             ]
             st.session_state.view_session_id = None
 
@@ -922,75 +829,40 @@ def main():
                 [session_id, goal_input, "running", max_steps_input]
             )
             con.close()
-            
             st.rerun()
         
-        # MiniMax API status
-        st.markdown("### MiniMax Status")
+        # API status (compact)
         if USE_MINIMAX_STUB or not MINIMAX_API_KEY:
-            st.info("Using stub (set MINIMAX_API_KEY and USE_MINIMAX_STUB=false for real API)")
+            st.caption("⚠️ Using stub mode")
         else:
-            st.success("API: Live — next steps printed to console")
+            st.caption("✅ API connected")
 
+    with col_live:
+        if st.session_state.latest_screenshot and os.path.exists(st.session_state.latest_screenshot):
+            st.image(st.session_state.latest_screenshot, caption="Current screen", width="stretch")
+        else:
+            st.info("Enter a goal and click Start to begin.")
+        if st.session_state.current_thought:
+            st.caption(f"💭 {st.session_state.current_thought}")
+
+    # Session activity log (compact)
     st.divider()
-    st.subheader("Session activity")
     session_log = st.session_state.get("session_log") or []
     if session_log:
-        try:
-            log_container = st.container(height=420)
-        except TypeError:
-            log_container = st.container()
-        with log_container:
-            for entry in session_log:
+        with st.expander(f"📋 Session Log ({len(session_log)} entries)", expanded=True):
+            for entry in session_log[-10:]:  # Show last 10 entries
                 msg = entry.get("message", "")
                 step = entry.get("step")
-                prefix = f"**Step {step}** " if step else ""
-                # Use chat message so the container auto-scrolls to show the latest entry
-                with st.chat_message("assistant", avatar="📋"):
-                    st.markdown(f"{prefix}{msg}")
-                    code = entry.get("code")
-                    if code:
-                        st.code(code, language="python")
-                    before = entry.get("screenshot_before")
-                    after = entry.get("screenshot_after")
-                    if before and os.path.exists(before):
-                        st.image(before, caption="Before step", width="stretch")
-                    if after and os.path.exists(after):
-                        st.image(after, caption="After step", width="stretch")
-    else:
-        st.caption("Activity will appear here after you start a task.")
+                prefix = f"[Step {step}] " if step else ""
+                st.markdown(f"{prefix}{msg}", unsafe_allow_html=True)
+                code = entry.get("code")
+                if code:
+                    st.code(code, language="python")
+                # Only show after screenshot (not before, to reduce clutter)
+                after = entry.get("screenshot_after")
+                if after and os.path.exists(after):
+                    st.image(after, caption="Result", width=400)
     
-    # Right Sidebar: DuckDB Audit Log
-    with st.sidebar:
-        st.markdown("---")
-        st.markdown("### DuckDB Audit Log")
-        
-        if st.session_state.get("session_id"):
-            con = get_connection()
-            logs = con.execute("""
-                SELECT step_number, thought, status, outcome, step_verification_achieved, step_verification_reason, created_at
-                FROM audit_log
-                WHERE session_id = ?
-                ORDER BY step_number
-            """, [st.session_state.session_id]).fetchall()
-            con.close()
-            
-            if logs:
-                for log in logs:
-                    step, thought, status, outcome = log[0], log[1], log[2], log[3]
-                    step_ver_ok = log[4] if len(log) > 4 else None
-                    step_ver_reason = log[5] if len(log) > 5 else None
-                    status_icon = "✅" if outcome == "Pass" else "❌" if outcome == "Fail" else "⏳"
-                    st.markdown(f"**Step {step}** {status_icon} ({status})")
-                    st.text(thought or "—")
-                    if step_ver_ok is not None or step_ver_reason:
-                        ver_icon = "✅" if str(step_ver_ok).lower() == "true" else "❌"
-                        st.caption(f"Step verified {ver_icon}: {step_ver_reason or ''}")
-                    st.divider()
-            else:
-                st.text("No logs yet.")
-        else:
-            st.text("Start a session to see logs.")
     
     # Loop: run until SUCCESS, LOST, or step_number >= max_steps (eval / decide in agent)
     max_steps = st.session_state.get("max_steps", 10)

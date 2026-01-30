@@ -1,8 +1,12 @@
 # Universal Tasker
 
-**Autonomous UI automation powered by vision + language models.**
+**Autonomous UI automation powered by MiniMax vision AI.**
 
-Give it a goal in plain English. It sees your screen, reasons about what to do, executes actions, and verifies each step—all without writing scripts or recording macros.
+> Give it a goal in plain English. It sees your screen, reasons about what to do, executes real actions, and verifies each step—no scripts, no selectors, just goals.
+
+**[Watch the Demo](demo-video.mp4)** | Built at the D.C. AI Hackathon with [MiniMax](https://minimax.io) + [Cursor](https://cursor.sh)
+
+---
 
 ## The Vision
 
@@ -144,4 +148,4 @@ MIT
 
 ---
 
-*Built at the Cursor Hackathon 2026*
+*Built at the D.C. AI Hackathon 2026 — Powered by [MiniMax](https://minimax.io) + [Cursor](https://cursor.sh)*

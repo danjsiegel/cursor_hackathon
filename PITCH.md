@@ -1,7 +1,25 @@
 # Universal Tasker - Pitch Notes
 
-## One-Liner
-**"Automate any UI with plain English—no scripts, no selectors, just goals."**
+## DevPost Description (2-3 sentences)
+
+> **Universal Tasker is an autonomous UI agent that automates any desktop application using natural language.** Powered by MiniMax M2.1 vision, it sees your screen, reasons about what to do, and executes real mouse/keyboard actions—turning goals like "open calculator and add 3+3" into completed tasks with a full audit trail. No scripts, no selectors, no API integrations required.
+
+---
+
+## Social Post (LinkedIn/X)
+
+> Just built Universal Tasker at the #DCCursorMiniMaxHackathon! 🤖
+>
+> An autonomous UI agent that automates ANY desktop app with plain English. Powered by @MiniMax vision AI—it sees your screen, thinks, and acts.
+>
+> No scripts. No selectors. Just goals → results.
+>
+> [demo link] [repo link]
+
+---
+
+## One-Liner (for pitch)
+**"Automate any UI with plain English—powered by MiniMax vision."**
 
 ## The Problem
 
@@ -37,19 +55,28 @@
 | One task = one script | One agent = infinite tasks |
 | Requires developers | Anyone can use it |
 
-## Demo Script
+## Demo Video
 
-1. **Show the UI**: "This is Universal Tasker. I give it a goal in plain English."
+**`demo-video.mp4`** — 3 min recorded demo (ready for DevPost submission)
 
-2. **Enter goal**: "Open Calculator and add 3+3"
+---
 
-3. **Watch it work**:
-   - "It takes a screenshot and sends it to the AI"
-   - "The AI reasons: 'I see the desktop, I'll open Spotlight'"
-   - "It executes the action and verifies it worked"
-   - "It continues until the goal is achieved"
+## Live Pitch Script (4 min: 2 demo + 1 explain + 1 Q&A)
 
-4. **Show the audit log**: "Every step is recorded—what it saw, what it did, whether it worked"
+### Demo (2 min)
+1. **Hook** (10s): "What if you could automate any desktop app just by describing what you want?"
+2. **Show UI** (10s): "Universal Tasker. Plain English in, task done."
+3. **Enter goal** (10s): "Open Calculator and add 3+3"
+4. **Watch it work** (60s): Let MiniMax see, reason, execute, verify
+5. **Show audit trail** (30s): "Full history—screenshots, actions, verifications"
+
+### Explanation (1 min)
+- "$50B RPA market problem—legacy systems don't have APIs"
+- "MiniMax M2.1 vision understands ANY interface"
+- "Unlike macros, we reason—so it adapts"
+- "Healthcare, finance, IT—anywhere humans click"
+
+### Q&A (1 min) — see prep below
 
 ## Use Cases to Mention
 
@@ -60,11 +87,27 @@
 
 ## Technical Highlights (if asked)
 
-- MiniMax M2.1 for vision + reasoning
+- **MiniMax M2.1** for vision + reasoning (sponsor!)
 - pyautogui for cross-platform execution
-- DuckDB for audit logging
+- DuckDB for persistent memory & audit logging
 - Streamlit for rapid UI prototyping
 - Step verification prevents hallucination loops
+
+## Why This Wins (Judging Criteria Alignment)
+
+| Criteria | How We Score |
+|----------|--------------|
+| **40% Technical Execution** | Real pyautogui execution, not just chat. Actually clicks, types, and verifies. |
+| **25% Impact** | Solves $50B/yr RPA market problem. Healthcare, finance, IT—anyone with legacy UIs. |
+| **15% Creativity** | Novel approach: vision-first UI automation vs. brittle selectors/recording. |
+| **10% UX/UI** | Clean Streamlit interface, live observation, audit trail. |
+| **10% Pitch** | Clear demo: goal → plan → execute → verify → done. |
+
+## MiniMax Integration (Sponsor Track)
+
+- **Primary model**: MiniMax M2.1 via API
+- **Usage**: Vision understanding, step planning, code generation, verification
+- **Why MiniMax**: Multimodal vision + reasoning in one call; fast inference for real-time automation
 
 ## Challenges We Solved
 

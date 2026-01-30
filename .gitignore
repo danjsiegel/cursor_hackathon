@@ -30,3 +30,7 @@ htmlcov/
 dist/
 build/
 *.egg-info/
+
+# Internal dev notes (not for public repo)
+initial_prompt.md
+CURSOR_PROMPT.md
