@@ -747,7 +747,7 @@ def main():
         if st.button("← Back to current session"):
             st.session_state.view_session_id = None
             st.rerun()
-        st.subheader(f"Session {str(vsid)[:8]}…")
+        st.subheader(f"Viewing session: {str(vsid)[:8]}…")
         init_db()
         con = get_connection()
         try:
@@ -793,17 +793,32 @@ def main():
             st.info("No step log for this session.")
         st.stop()
 
-    # Current session: show activity log (chat-like) then screenshot/thought
+    # Current session: anchored status + scrollable activity log with screenshots
+    sid = st.session_state.get("session_id")
+    if sid:
+        st.caption(f"**Current session:** {str(sid)[:8]}… — Enter a new goal and Start for a new session.")
+    else:
+        st.caption("**New session** — Enter a goal and click Start.")
+
     st.subheader("Session activity")
     session_log = st.session_state.get("session_log") or []
     if session_log:
-        log_container = st.container()
+        try:
+            log_container = st.container(height=420)
+        except TypeError:
+            log_container = st.container()
         with log_container:
             for entry in session_log:
                 msg = entry.get("message", "")
                 step = entry.get("step")
                 prefix = f"**Step {step}** " if step else ""
                 st.markdown(f"{prefix}{msg}")
+                before = entry.get("screenshot_before")
+                after = entry.get("screenshot_after")
+                if before and os.path.exists(before):
+                    st.image(before, caption="Before step", use_container_width=True)
+                if after and os.path.exists(after):
+                    st.image(after, caption="After step", use_container_width=True)
         st.divider()
     else:
         st.caption("Activity will appear here after you start a task.")
@@ -909,16 +924,19 @@ def main():
     max_steps = st.session_state.get("max_steps", 10)
     step_n = st.session_state.get("step_number", 0)
 
-    def _log(msg: str, step: Optional[int] = None) -> None:
-        (st.session_state.setdefault("session_log", [])).append(
-            {"message": msg, "step": step, "ts": datetime.now().isoformat()}
-        )
+    def _log(msg: str, step: Optional[int] = None, screenshot_before: Optional[str] = None, screenshot_after: Optional[str] = None) -> None:
+        entry = {"message": msg, "step": step, "ts": datetime.now().isoformat()}
+        if screenshot_before:
+            entry["screenshot_before"] = screenshot_before
+        if screenshot_after:
+            entry["screenshot_after"] = screenshot_after
+        (st.session_state.setdefault("session_log", [])).append(entry)
 
     if st.session_state.get("is_running") and st.session_state.get("session_id") and step_n <= max_steps:
         _log(f"Step {step_n}: Capturing screenshot…", step_n)
         screenshot_path = f"{SCREENSHOTS_DIR}/{st.session_state.session_id}/step_{step_n}_before.png"
         screenshot, screenshot_feedback = capture_screenshot(screenshot_path)
-        _log("Screenshot captured.", step_n)
+        _log("Screenshot captured.", step_n, screenshot_before=screenshot_path if screenshot else None)
 
         if not screenshot:
             st.session_state.is_running = False
@@ -957,18 +975,20 @@ def main():
                 if translated:
                     code = translated
 
-            # First step: store planned total_steps and checkpoints from MiniMax
+            # First step: store planned total_steps and checkpoints from MiniMax (don't reduce below 2)
             if st.session_state.step_number == 1:
-                if result.get("total_steps") is not None and result["total_steps"] > 0:
+                if result.get("total_steps") is not None and result["total_steps"] >= 2:
                     st.session_state.planned_total_steps = result["total_steps"]
-                    st.session_state.max_steps = result["total_steps"]
+                    st.session_state.max_steps = max(st.session_state.max_steps, result["total_steps"])
                 if result.get("checkpoints"):
                     st.session_state.checkpoints = list(result["checkpoints"])
             
             _log("Doing steps (executing code).", step_n)
-            # Execute the action (pyautogui). On failure: error out, do not continue.
+            # Fix MiniMax code that uses pyautogui.sleep (pyautogui has no .sleep; use time.sleep)
+            code_to_run = code.replace("pyautogui.sleep(", "time.sleep(") if "pyautogui.sleep(" in code else code
+            exec_globals = {"__builtins__": __builtins__, "pyautogui": pyautogui, "time": __import__("time")}
             try:
-                exec(code)
+                exec(code_to_run, exec_globals)
                 outcome = "Pass"
                 feedback = None
                 _log("Step done. Outcome: Pass.", step_n)
@@ -1007,6 +1027,7 @@ def main():
             # Capture after screenshot
             after_path = f"{SCREENSHOTS_DIR}/{st.session_state.session_id}/step_{st.session_state.step_number}_after.png"
             _, after_screenshot_path = capture_screenshot(after_path)
+            _log("Screenshot (after step).", step_n, screenshot_after=after_screenshot_path)
 
             # Per-step verification: did we actually do what we said we would?
             step_verification = verify_step_achieved(thought, after_screenshot_path, user_env)
