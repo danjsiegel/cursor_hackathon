@@ -1,4 +1,4 @@
 The user asked for: {goal}
 
 {user_context_block}
-This screenshot shows the final state. Is what was asked achieved? Respond with only a JSON object: {"achieved": true or false, "reason": "..."}.
+This screenshot shows the final state. Is what was asked achieved? Respond with only a JSON object: {{"achieved": true or false, "reason": "..."}}.

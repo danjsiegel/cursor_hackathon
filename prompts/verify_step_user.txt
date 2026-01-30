@@ -1,4 +1,4 @@
 I intended to do: {intended_thought}
 
 {user_context_block}
-This screenshot is the state after the step. Did I actually do these things? Respond with only a JSON object: {"achieved": true or false, "reason": "..."}.
+This screenshot is the state after the step. Did I actually do these things? Respond with only a JSON object: {{"achieved": true or false, "reason": "..."}}.

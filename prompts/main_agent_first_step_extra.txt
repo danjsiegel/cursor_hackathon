@@ -1,8 +1,7 @@
-
-## First step only: plan and checkpoints
+## First step only: plan the workflow
 On the **first** response (this one), also include:
-- "total_steps": (integer) How many steps you expect to need to complete the goal. We use this as a recommended stop point.
-- "checkpoints": (array of step numbers, e.g. [2, 4]) Step numbers at which we should take a validation screenshot and re-confirm the cycle. These are good points to pause, screenshot, and validate progress before continuing. If none, use [].
+- "total_steps": (integer) How many steps you expect to need to complete the goal. We use this as the workflow length (max steps)—not a fixed 10. Give a realistic number (e.g. 3 for "open Calculator and add 3+3").
+- "checkpoints": (array of step numbers, e.g. [2, 4]) Step numbers at which we should take a validation screenshot and re-confirm the cycle. If none, use [].
 
 Example first response:
-{"thought": "I see the desktop. I will open Calculator via Run.", "code": "import pyautogui; pyautogui.hotkey('command', 'space'); pyautogui.write('Calculator'); pyautogui.press('enter')", "status": "CONTINUE", "total_steps": 3, "checkpoints": [2]}
+{"thought": "I see the desktop. I will open Calculator via Spotlight.", "code": "import pyautogui; pyautogui.hotkey('command', 'space'); pyautogui.write('Calculator'); pyautogui.press('enter')", "status": "CONTINUE", "total_steps": 3, "checkpoints": [2]}

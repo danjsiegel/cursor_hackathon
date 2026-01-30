@@ -8,6 +8,7 @@ import json
 import os
 import platform
 import re
+import traceback
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +25,7 @@ import streamlit as st
 from PIL import Image
 
 from prompts import format_prompt, load as load_prompt
+from pyautogui_check import check_pyautogui_control
 from task_translator import translate_task_to_code as translate_task_rules
 
 # -----------------------------------------------------------------------------
@@ -43,7 +45,8 @@ USE_MINIMAX_STUB = os.getenv("USE_MINIMAX_STUB", "true").lower() in ("true", "1"
 # User environment (OS, browser) for prompts
 # -----------------------------------------------------------------------------
 def get_user_environment(browser_override: Optional[str] = None) -> str:
-    """Build a short description of the user's OS and browser for MiniMax context."""
+    """Build a short description of the user's OS, browser, and display for MiniMax context.
+    Includes screen size and cursor position when available so the agent can reason about coordinates."""
     parts = []
     sys_name = platform.system()
     if sys_name == "Darwin":
@@ -60,6 +63,18 @@ def get_user_environment(browser_override: Optional[str] = None) -> str:
         pass
     browser = (browser_override or "").strip() or "unknown"
     parts.append(f"Browser: {browser}")
+    try:
+        size = pyautogui.size()
+        if size and len(size) >= 2 and size[0] > 0 and size[1] > 0:
+            parts.append(f"Screen: {size[0]}x{size[1]} (width x height in pixels)")
+    except Exception:
+        pass
+    try:
+        pos = pyautogui.position()
+        if pos is not None and len(pos) >= 2:
+            parts.append(f"Cursor: ({pos[0]}, {pos[1]})")
+    except Exception:
+        pass
     return "; ".join(parts)
 
 # -----------------------------------------------------------------------------
@@ -185,6 +200,7 @@ def capture_screenshot(save_path: Optional[str] = None) -> Tuple[Optional[Image.
         st.error(f"Screenshot failed: {e}")
         return None, "screenshot_failed"
 
+
 # -----------------------------------------------------------------------------
 # MiniMax API (stub when USE_MINIMAX_STUB or no MINIMAX_API_KEY; real API when key set)
 # -----------------------------------------------------------------------------
@@ -208,7 +224,7 @@ def _call_minimax_api(screenshot_path: str, goal: str, history: list, is_first_s
     history_text = ""
     if history:
         history_text = "\n".join([
-            f"Step {h.get('step_number', i+1)}: thought={h.get('thought', '')[:200]} status={h.get('status', '')} outcome={h.get('outcome', '')}"
+            f"Step {h.get('step_number', i+1)}: thought={h.get('thought', '')[:200]} code={h.get('code', '')[:150]} status={h.get('status', '')} outcome={h.get('outcome', '')}"
             for i, h in enumerate(history)
         ])
 
@@ -651,9 +667,23 @@ def main():
         st.session_state.session_log = []  # chat-like activity: [{ "message", "step", "ts" }]
     if 'view_session_id' not in st.session_state:
         st.session_state.view_session_id = None  # when set, main area shows that session's full log
+    # Run pyautogui display-control check once per run and store result (used in sidebar + elsewhere)
+    if 'pyautogui_control_ok' not in st.session_state:
+        _ok, _msg = check_pyautogui_control()
+        st.session_state.pyautogui_control_ok = _ok
+        st.session_state.pyautogui_control_message = _msg or ""
 
     # Left Sidebar: Attempt N / max M (eval cycle; no fixed 10-step)
     with st.sidebar:
+        if st.session_state.get("pyautogui_control_ok", True):
+            st.success("Automation: good to go")
+        else:
+            st.warning(st.session_state.get("pyautogui_control_message", "Automation may not control the display."))
+        if st.button("Re-check automation", help="Run the pyautogui display check again (e.g. after granting Accessibility)."):
+            _ok, _msg = check_pyautogui_control()
+            st.session_state.pyautogui_control_ok = _ok
+            st.session_state.pyautogui_control_message = _msg or ""
+            st.rerun()
         st.title("Session Progress")
         max_s = st.session_state.get("max_steps", 10)
         step = st.session_state.get("step_number", 0)
@@ -738,8 +768,37 @@ def main():
         else:
             st.caption("No sessions yet. Start a task to see history here.")
     
-    # Main Area: Session activity (chat-like) + Live Screenshot + Thought
+    # Main Area: Title + Status on top; Goal + Live in middle; Session activity at bottom
     st.title("The Universal Tasker")
+
+    # Status bar: Waiting | Running | Succeeded | Failed
+    sid = st.session_state.get("session_id")
+    is_running = st.session_state.get("is_running", False)
+    if st.session_state.get("view_session_id"):
+        status_label = "Viewing session"
+        status_color = "blue"
+    elif not sid:
+        status_label = "Waiting"
+        status_color = "gray"
+    elif is_running:
+        status_label = "Running"
+        status_color = "orange"
+    else:
+        init_db()
+        con = get_connection()
+        try:
+            row = con.execute("SELECT status FROM sessions WHERE id = ?", [sid]).fetchone()
+            session_status = row[0] if row else ""
+        finally:
+            con.close()
+        if session_status == "success":
+            status_label = "Succeeded"
+            status_color = "green"
+        else:
+            status_label = "Failed"
+            status_color = "red"
+    st.markdown(f"**Status:** {status_label}")
+    st.divider()
 
     # Viewing an older session: show its full log and "Back to current"
     if st.session_state.get("view_session_id"):
@@ -758,7 +817,8 @@ def main():
                 goal, status, created = row[0], row[1], row[2]
                 st.caption(f"Goal: {goal or '(none)'} · Status: {status} · {created}")
             logs = con.execute("""
-                SELECT step_number, thought, code, status, outcome, step_verification_achieved, step_verification_reason, feedback
+                SELECT step_number, thought, code, status, outcome, step_verification_achieved, step_verification_reason, feedback,
+                       screenshot_before_path, screenshot_after_path
                 FROM audit_log WHERE session_id = ? ORDER BY step_number
             """, [str(vsid)]).fetchall()
         finally:
@@ -772,12 +832,18 @@ def main():
                     row[6] if len(row) > 6 else None,
                     row[7] if len(row) > 7 else None,
                 )
+                screenshot_before = row[8] if len(row) > 8 else None
+                screenshot_after = row[9] if len(row) > 9 else None
                 with st.expander(f"Step {step_n} — {step_status} — {outcome}", expanded=(outcome == "Fail" or step_n == len(logs))):
+                    if screenshot_before and os.path.exists(screenshot_before):
+                        st.image(screenshot_before, caption="Before", width="stretch")
                     st.markdown("**Thought**")
                     st.text(thought or "—")
                     if code:
                         st.markdown("**Code**")
                         st.code(code, language="python")
+                    if screenshot_after and os.path.exists(screenshot_after):
+                        st.image(screenshot_after, caption="After", width="stretch")
                     if ver_reason:
                         st.caption(f"Step verification: {ver_ok} — {ver_reason}")
                     if feedback:
@@ -793,53 +859,16 @@ def main():
             st.info("No step log for this session.")
         st.stop()
 
-    # Current session: anchored status + scrollable activity log with screenshots
-    sid = st.session_state.get("session_id")
-    if sid:
-        st.caption(f"**Current session:** {str(sid)[:8]}… — Enter a new goal and Start for a new session.")
-    else:
-        st.caption("**New session** — Enter a goal and click Start.")
-
-    st.subheader("Session activity")
-    session_log = st.session_state.get("session_log") or []
-    if session_log:
-        try:
-            log_container = st.container(height=420)
-        except TypeError:
-            log_container = st.container()
-        with log_container:
-            for entry in session_log:
-                msg = entry.get("message", "")
-                step = entry.get("step")
-                prefix = f"**Step {step}** " if step else ""
-                st.markdown(f"{prefix}{msg}")
-                before = entry.get("screenshot_before")
-                after = entry.get("screenshot_after")
-                if before and os.path.exists(before):
-                    st.image(before, caption="Before step", use_container_width=True)
-                if after and os.path.exists(after):
-                    st.image(after, caption="After step", use_container_width=True)
-        st.divider()
-    else:
-        st.caption("Activity will appear here after you start a task.")
-        st.divider()
-    
+    # Current session: Goal + Live Observation in middle
     col1, col2 = st.columns([3, 1])
-    
     with col1:
         st.subheader("Live Observation")
-        
         if st.session_state.latest_screenshot and os.path.exists(st.session_state.latest_screenshot):
-            st.image(st.session_state.latest_screenshot, caption="Latest Screenshot", use_container_width=True)
+            st.image(st.session_state.latest_screenshot, caption="Latest Screenshot", width="stretch")
         else:
             st.info("No screenshot captured yet. Enter a goal and click Start.")
-        
         if st.session_state.current_thought:
-            st.markdown(f"""
-            ### Current Thought
-            > {st.session_state.current_thought}
-            """)
-    
+            st.markdown(f"**Current thought:** {st.session_state.current_thought}")
     with col2:
         st.subheader("Goal")
         goal_input = st.text_area("Enter your goal:", placeholder="Open Calculator and type 'Hello World'", height=100)
@@ -887,6 +916,34 @@ def main():
             st.info("Using stub (set MINIMAX_API_KEY and USE_MINIMAX_STUB=false for real API)")
         else:
             st.success("API: Live — next steps printed to console")
+
+    st.divider()
+    st.subheader("Session activity")
+    session_log = st.session_state.get("session_log") or []
+    if session_log:
+        try:
+            log_container = st.container(height=420)
+        except TypeError:
+            log_container = st.container()
+        with log_container:
+            for entry in session_log:
+                msg = entry.get("message", "")
+                step = entry.get("step")
+                prefix = f"**Step {step}** " if step else ""
+                # Use chat message so the container auto-scrolls to show the latest entry
+                with st.chat_message("assistant", avatar="📋"):
+                    st.markdown(f"{prefix}{msg}")
+                    code = entry.get("code")
+                    if code:
+                        st.code(code, language="python")
+                    before = entry.get("screenshot_before")
+                    after = entry.get("screenshot_after")
+                    if before and os.path.exists(before):
+                        st.image(before, caption="Before step", width="stretch")
+                    if after and os.path.exists(after):
+                        st.image(after, caption="After step", width="stretch")
+    else:
+        st.caption("Activity will appear here after you start a task.")
     
     # Right Sidebar: DuckDB Audit Log
     with st.sidebar:
@@ -924,18 +981,22 @@ def main():
     max_steps = st.session_state.get("max_steps", 10)
     step_n = st.session_state.get("step_number", 0)
 
-    def _log(msg: str, step: Optional[int] = None, screenshot_before: Optional[str] = None, screenshot_after: Optional[str] = None) -> None:
+    def _log(msg: str, step: Optional[int] = None, screenshot_before: Optional[str] = None, screenshot_after: Optional[str] = None, code: Optional[str] = None) -> None:
         entry = {"message": msg, "step": step, "ts": datetime.now().isoformat()}
         if screenshot_before:
             entry["screenshot_before"] = screenshot_before
         if screenshot_after:
             entry["screenshot_after"] = screenshot_after
+        if code:
+            entry["code"] = code
         (st.session_state.setdefault("session_log", [])).append(entry)
 
     if st.session_state.get("is_running") and st.session_state.get("session_id") and step_n <= max_steps:
         _log(f"Step {step_n}: Capturing screenshot…", step_n)
         screenshot_path = f"{SCREENSHOTS_DIR}/{st.session_state.session_id}/step_{step_n}_before.png"
         screenshot, screenshot_feedback = capture_screenshot(screenshot_path)
+        if screenshot:
+            st.session_state.current_step_screenshot_before = screenshot_path
         _log("Screenshot captured.", step_n, screenshot_before=screenshot_path if screenshot else None)
 
         if not screenshot:
@@ -975,20 +1036,28 @@ def main():
                 if translated:
                     code = translated
 
-            # First step: store planned total_steps and checkpoints from MiniMax (don't reduce below 2)
+            # First step: use agent's total_steps as the workflow length (dynamic, not fixed 10)
             if st.session_state.step_number == 1:
-                if result.get("total_steps") is not None and result["total_steps"] >= 2:
+                if result.get("total_steps") is not None and result["total_steps"] >= 1:
                     st.session_state.planned_total_steps = result["total_steps"]
-                    st.session_state.max_steps = max(st.session_state.max_steps, result["total_steps"])
+                    st.session_state.max_steps = max(2, result["total_steps"])  # agent defines workflow length; at least 2
                 if result.get("checkpoints"):
                     st.session_state.checkpoints = list(result["checkpoints"])
             
-            _log("Doing steps (executing code).", step_n)
-            # Fix MiniMax code that uses pyautogui.sleep (pyautogui has no .sleep; use time.sleep)
+            # Fix MiniMax code: pyautogui.sleep -> time.sleep; add short delays between pyautogui calls so UI can respond
             code_to_run = code.replace("pyautogui.sleep(", "time.sleep(") if "pyautogui.sleep(" in code else code
-            exec_globals = {"__builtins__": __builtins__, "pyautogui": pyautogui, "time": __import__("time")}
+            # Insert time.sleep(0.6) before each pyautogui call after the first, so e.g. Spotlight appears before we type
+            code_to_run = code_to_run.replace("; pyautogui.", "; time.sleep(0.6); pyautogui.")
+            _log("Doing steps (executing code).", step_n, code=code_to_run)
+            # Run in module scope so pyautogui and time are available and actually control the desktop.
+            # Explicitly inject pyautogui and time so exec'd code uses the real modules (not a restricted copy).
+            _run_globals = dict(globals())
+            _run_globals["pyautogui"] = pyautogui
+            _run_globals["time"] = __import__("time")
             try:
-                exec(code_to_run, exec_globals)
+                exec(code_to_run, _run_globals)
+                # Brief pause so UI updates before we capture the "after" screenshot
+                _run_globals["time"].sleep(0.4)
                 outcome = "Pass"
                 feedback = None
                 _log("Step done. Outcome: Pass.", step_n)
@@ -1134,9 +1203,41 @@ def main():
             st.rerun()
         except Exception as e:
             st.session_state.is_running = False
+            # Build rich feedback for audit: exception + traceback
+            err_msg = str(e)
+            try:
+                tb = traceback.format_exc()
+                feedback_text = f"{err_msg}\n\nTraceback:\n{tb}" if tb else err_msg
+            except Exception:
+                feedback_text = err_msg
+            # Use any screenshot we had for this step (helps debug what state we were in)
+            fail_screenshot_before = st.session_state.get("current_step_screenshot_before")
+            if fail_screenshot_before and not os.path.exists(fail_screenshot_before):
+                fail_screenshot_before = None
             try:
                 con = get_connection()
                 con.execute("UPDATE sessions SET status = ? WHERE id = ?", ["error", st.session_state.session_id])
+                # Log failure so "View full log" shows why it failed (audit specific failure)
+                if st.session_state.get("session_id"):
+                    con.execute("""
+                        INSERT INTO audit_log
+                        (session_id, step_number, thought, code, action, feedback, status, outcome,
+                         screenshot_before_path, screenshot_after_path, step_verification_achieved, step_verification_reason)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, [
+                        st.session_state.session_id,
+                        0,
+                        "Task failed before or during first step.",
+                        None,
+                        "Task initialization failed",
+                        feedback_text[:8192] if len(feedback_text) > 8192 else feedback_text,  # cap size for DB
+                        "error",
+                        "Fail",
+                        fail_screenshot_before,
+                        None,
+                        None,
+                        None,
+                    ])
                 con.close()
             except Exception:
                 pass
