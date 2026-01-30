@@ -1,0 +1,1 @@
+Convert this step into pyautogui code (one line, no explanation): {step_description}

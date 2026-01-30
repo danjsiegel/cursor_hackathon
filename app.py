@@ -23,6 +23,8 @@ import pyautogui
 import streamlit as st
 from PIL import Image
 
+from prompts import format_prompt, load as load_prompt
+
 # -----------------------------------------------------------------------------
 # Configuration
 # -----------------------------------------------------------------------------
@@ -209,59 +211,28 @@ def _call_minimax_api(screenshot_path: str, goal: str, history: list, is_first_s
             for i, h in enumerate(history)
         ])
 
-    first_step_extra = ""
-    if is_first_step:
-        first_step_extra = """
-## First step only: plan and checkpoints
-On the **first** response (this one), also include:
-- "total_steps": (integer) How many steps you expect to need to complete the goal. We use this as a recommended stop point.
-- "checkpoints": (array of step numbers, e.g. [2, 4]) Step numbers at which we should take a validation screenshot and re-confirm the cycle. These are good points to pause, screenshot, and validate progress before continuing. If none, use [].
-
-Example first response:
-{"thought": "I see the desktop. I will open Calculator via Run.", "code": "import pyautogui; pyautogui.hotkey('command', 'space'); pyautogui.write('Calculator'); pyautogui.press('enter')", "status": "CONTINUE", "total_steps": 3, "checkpoints": [2]}
-"""
-
+    first_step_extra = load_prompt("main_agent_first_step_extra") if is_first_step else ""
     user_context_line = f"\n**User context:** {user_env}\n" if user_env else ""
-    system_prompt = """You are the reasoning engine for the Universal Tasker: an autonomous UI agent that completes a user's goal by controlling the computer with Python.
-""" + user_context_line + """
-## What we do
-- We send you the current screen (screenshot image) and the user's goal.
-- You respond with exactly one "next step": your reasoning, one snippet of Python code we will execute, and a status.
-- We run your code with pyautogui on the live machine, then capture a new screenshot and call you again with the updated state.
-- This repeats until you return status SUCCESS (goal done), LOST (stuck), or we hit a step limit.
-- If we get stuck (LOST or code error), we stop immediately and do not retry or self-solve.
+    example_response = (
+        '\nExample response:\n{"thought": "Calculator is open. I will type 42.", "code": "import pyautogui; pyautogui.write(\\"42\\"); pyautogui.press(\\"enter\\")", "status": "SUCCESS"}'
+        if not is_first_step
+        else ""
+    )
+    system_prompt = format_prompt(
+        load_prompt("main_agent_system"),
+        user_context_line=user_context_line,
+        first_step_extra=first_step_extra,
+        example_response=example_response,
+    )
 
-## What we need from you (exactly one JSON object, no markdown, no text outside the JSON)
-- "thought": 1–2 sentences: what you see in the screenshot and what you will do in this step. Be specific (e.g. "I see the Calculator window; I will type the number 42.").
-- "code": Valid Python code that we will run via exec(). It must use only the pyautogui API and Python built-ins. Prefer a single line with semicolons; if you need multiple lines, keep it minimal. Each response is executed in isolation, so include "import pyautogui" in the snippet if you use it.
-- "status": Exactly one of:
-  - "CONTINUE" — more steps needed to reach the goal.
-  - "SUCCESS" — the goal is achieved; we will stop.
-  - "LOST" — you cannot proceed (wrong screen, missing element, or need human input); we will stop. We do not retry; we error out.
-""" + first_step_extra + """
-## Allowed Python tools (pyautogui only)
-- Mouse: pyautogui.click(x, y) or click() for current position, doubleClick(), rightClick(), moveTo(x,y), moveRel(dx,dy), drag(x,y), scroll(amount)
-- Keyboard: pyautogui.write("text"), pyautogui.press("enter"), pyautogui.hotkey("ctrl", "c") or hotkey("command", "v")
-- Modifier keys: On macOS use "command" and "option"; on Windows use "win" and "alt". Use "ctrl", "shift", "enter", "tab", "space" as needed.
-- Do not use: PIL, selenium, other libs, or file/network operations. Only pyautogui and built-ins (e.g. time.sleep(1) for short delays).
-
-## Rules
-- One atomic action per response (e.g. one click, one type, one key combo). We will call you again for the next step.
-- Code must run without user input and without opening dialogs that block (prefer direct keystrokes or clicks).
-- Respond with only the JSON object. No preamble, no markdown code fence, no explanation after the JSON.
-"""
-
-    if not is_first_step:
-        system_prompt += '\nExample response:\n{"thought": "Calculator is open. I will type 42.", "code": "import pyautogui; pyautogui.write(\\"42\\"); pyautogui.press(\\"enter\\")", "status": "SUCCESS"}'
-
-    user_text = f"Goal: {goal}\n\n"
-    if history_text:
-        user_text += f"Steps already taken (for context):\n{history_text}\n\n"
-    user_text += "The current screenshot is attached. Respond with exactly one JSON object"
-    if is_first_step:
-        user_text += " with keys: thought, code, status, total_steps, checkpoints."
-    else:
-        user_text += " with keys: thought, code, status."
+    history_block = f"Steps already taken (for context):\n{history_text}\n\n" if history_text else ""
+    json_keys_suffix = " with keys: thought, code, status, total_steps, checkpoints." if is_first_step else " with keys: thought, code, status."
+    user_text = format_prompt(
+        load_prompt("main_agent_user"),
+        goal=goal,
+        history_block=history_block,
+        json_keys_suffix=json_keys_suffix,
+    )
 
     # MiniMax chatcompletion_v2: messages with role and content.
     # Try multimodal first (content as array with image_url). If API rejects, fall back to text-only.
@@ -373,17 +344,17 @@ def validate_goal_achieved(goal: str, screenshot_path: str, user_env: str = "") 
     if not b64:
         return None
 
-    system_prompt = """You are a validator. Given a user's goal and a screenshot of the final state after a task, determine if what was asked was achieved.
-Respond with exactly one JSON object, no markdown, no other text:
-- "achieved": true or false
-- "reason": one or two sentences explaining what you see and why it does or does not match the goal."""
-    if user_env:
-        system_prompt += f"\n**User context:** {user_env}"
-
-    user_text = f"The user asked for: {goal}\n\n"
-    if user_env:
-        user_text += f"User context: {user_env}\n\n"
-    user_text += "This screenshot shows the final state. Is what was asked achieved? Respond with only a JSON object: {\"achieved\": true or false, \"reason\": \"...\"}."
+    user_context_line = f"\n**User context:** {user_env}" if user_env else ""
+    user_context_block = f"User context: {user_env}\n\n" if user_env else ""
+    system_prompt = format_prompt(
+        load_prompt("validate_goal_system"),
+        user_context_line=user_context_line,
+    )
+    user_text = format_prompt(
+        load_prompt("validate_goal_user"),
+        goal=goal,
+        user_context_block=user_context_block,
+    )
 
     content_parts = [{"type": "text", "text": user_text}, {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}]
     payload = {
@@ -448,18 +419,17 @@ def verify_step_achieved(intended_thought: str, screenshot_path: str, user_env: 
     if not b64:
         return None
 
-    system_prompt = """You are a step verifier. The agent said it would do something. This screenshot shows the state AFTER that step.
-Your job: did the agent actually do what it said? (e.g. if it said "open Calculator", is Calculator open?)
-Respond with exactly one JSON object, no markdown:
-- "achieved": true or false
-- "reason": one or two sentences: what you see in the screenshot and whether it matches what was intended."""
-    if user_env:
-        system_prompt += f"\n**User context:** {user_env}"
-
-    user_text = f"I intended to do: {intended_thought}\n\n"
-    if user_env:
-        user_text += f"User context: {user_env}\n\n"
-    user_text += "This screenshot is the state after the step. Did I actually do these things? Respond with only a JSON object: {\"achieved\": true or false, \"reason\": \"...\"}."
+    user_context_line = f"\n**User context:** {user_env}" if user_env else ""
+    user_context_block = f"User context: {user_env}\n\n" if user_env else ""
+    system_prompt = format_prompt(
+        load_prompt("verify_step_system"),
+        user_context_line=user_context_line,
+    )
+    user_text = format_prompt(
+        load_prompt("verify_step_user"),
+        intended_thought=intended_thought,
+        user_context_block=user_context_block,
+    )
 
     content_parts = [{"type": "text", "text": user_text}, {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}]
     payload = {
@@ -524,16 +494,15 @@ def translate_step_to_code(step_description: str, user_env: str = "") -> Optiona
     if not step_description:
         return None
 
-    system_prompt = """You convert a step description into exactly one line of Python code using only pyautogui and built-ins.
-Output ONLY the code, no explanation, no markdown. Use semicolons for multiple statements. Include "import pyautogui" if needed.
-Examples:
-- "press Windows key and type Calculator" -> import pyautogui; pyautogui.press('win'); pyautogui.write('Calculator'); pyautogui.press('enter')
-- "type 3+3 and press Enter" -> import pyautogui; pyautogui.write('3+3'); pyautogui.press('enter')
-On macOS use 'command' not 'win'; on Windows use 'win'."""
-    if user_env:
-        system_prompt += f"\n**User context:** {user_env}"
-
-    user_text = f"Convert this step into pyautogui code (one line, no explanation): {step_description}"
+    user_context_line = f"\n**User context:** {user_env}" if user_env else ""
+    system_prompt = format_prompt(
+        load_prompt("translate_step_system"),
+        user_context_line=user_context_line,
+    )
+    user_text = format_prompt(
+        load_prompt("translate_step_user"),
+        step_description=step_description,
+    )
 
     payload = {
         "model": "MiniMax-M2.1",

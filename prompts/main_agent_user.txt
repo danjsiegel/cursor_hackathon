@@ -1,0 +1,4 @@
+Goal: {goal}
+
+{history_block}
+The current screenshot is attached. Respond with exactly one JSON object{json_keys_suffix}
