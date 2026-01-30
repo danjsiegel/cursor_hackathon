@@ -1,0 +1,12 @@
+[project]
+name = "rot"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "duckdb>=1.4.4",
+    "pillow>=11.3.0",
+    "pyautogui>=0.9.54",
+    "streamlit>=1.50.0",
+]
