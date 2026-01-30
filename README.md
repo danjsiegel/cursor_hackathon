@@ -1,10 +1,12 @@
 # Universal Tasker
 
-**Autonomous UI automation powered by MiniMax vision AI.**
+|**Autonomous UI automation powered by MiniMax vision AI.**|
 
-> Give it a goal in plain English. It sees your screen, reasons about what to do, executes real actions, and verifies each step—no scripts, no selectors, just goals.
+|> Give it a goal in plain English. It sees your screen, reasons about what to do, executes real actions, and verifies each step—no scripts, no selectors, just goals.
 
-**[Watch the Demo](demo-video.mp4)** | Built at the D.C. AI Hackathon with [MiniMax](https://minimax.io) + [Cursor](https://cursor.sh)
+| Built at the D.C. AI Hackathon with [MiniMax](https://minimax.io) + [Cursor](https://cursor.sh)
+
+![Demo](demo.gif)
 
 ---
 
@@ -23,9 +25,8 @@ Traditional automation requires:
 
 ### Use Cases
 
-| Domain | Example ![Demo](demo.gif)
-
---------|---------|
+| Domain | Example |
+|--------|---------|
 | **Healthcare** | Automate billing workflows in legacy EMR systems |
 | **Finance** | Process invoices across multiple vendor portals |
 | **IT Support** | Guided troubleshooting with automatic verification |
