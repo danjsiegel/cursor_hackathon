@@ -2,9 +2,9 @@
 
 |**Autonomous UI automation powered by MiniMax vision AI.**|
 
-|> Give it a goal in plain English. It sees your screen, reasons about what to do, executes real actions, and verifies each step—no scripts, no selectors, just goals.
+> Give it a goal in plain English. It sees your screen, reasons about what to do, executes real actions, and verifies each step—no scripts, no selectors, just goals.
 
-| Built at the D.C. AI Hackathon with [MiniMax](https://minimax.io) + [Cursor](https://cursor.sh)
+Built at the D.C. AI Hackathon with [MiniMax](https://minimax.io) + [Cursor](https://cursor.sh)
 
 ![Demo](demo.gif)
 
