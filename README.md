@@ -23,8 +23,9 @@ Traditional automation requires:
 
 ### Use Cases
 
-| Domain | Example |
-|--------|---------|
+| Domain | Example ![Demo](demo.gif)
+
+--------|---------|
 | **Healthcare** | Automate billing workflows in legacy EMR systems |
 | **Finance** | Process invoices across multiple vendor portals |
 | **IT Support** | Guided troubleshooting with automatic verification |
