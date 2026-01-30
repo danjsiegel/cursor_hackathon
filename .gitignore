@@ -1,15 +1,32 @@
 # Environment
 .env
-.venv
+.venv/
 venv/
 __pycache__/
 *.pyc
+*.pyo
 .python-version
 
-# Data (local DuckDB and screenshots)
+# Data (local DuckDB, screenshots, rules learned from sessions)
 data/
 
 # IDE / OS
 .idea/
+.vscode/
 .DS_Store
 *.swp
+*~
+.cursor/
+
+# Logs
+*.log
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Build
+dist/
+build/
+*.egg-info/

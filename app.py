@@ -24,8 +24,12 @@ import pyautogui
 import streamlit as st
 from PIL import Image
 
+# pyautogui timing: add a small pause after each call so macOS registers clicks/keys
+pyautogui.PAUSE = 0.15  # 150ms pause after each pyautogui function
+pyautogui.FAILSAFE = True  # move mouse to corner to abort
+
 from prompts import format_prompt, load as load_prompt
-from pyautogui_check import check_pyautogui_control
+from pyautogui_check import check_pyautogui_control, test_click_works, get_permission_help
 from task_translator import translate_task_to_code as translate_task_rules
 
 # -----------------------------------------------------------------------------
@@ -679,11 +683,22 @@ def main():
             st.success("Automation: good to go")
         else:
             st.warning(st.session_state.get("pyautogui_control_message", "Automation may not control the display."))
-        if st.button("Re-check automation", help="Run the pyautogui display check again (e.g. after granting Accessibility)."):
-            _ok, _msg = check_pyautogui_control()
-            st.session_state.pyautogui_control_ok = _ok
-            st.session_state.pyautogui_control_message = _msg or ""
-            st.rerun()
+        col_chk, col_tst = st.columns(2)
+        with col_chk:
+            if st.button("Re-check", help="Run the pyautogui display check again (e.g. after granting Accessibility)."):
+                _ok, _msg = check_pyautogui_control()
+                st.session_state.pyautogui_control_ok = _ok
+                st.session_state.pyautogui_control_message = _msg or ""
+                st.rerun()
+        with col_tst:
+            if st.button("Test click", help="Perform a test click at the current mouse position to verify clicks work."):
+                _ok, _msg = test_click_works()
+                if _ok:
+                    st.success("Click works!")
+                else:
+                    st.error(_msg or "Click test failed.")
+        with st.expander("🔧 Permissions Help", expanded=not st.session_state.get("pyautogui_control_ok", True)):
+            st.markdown(get_permission_help())
         st.title("Session Progress")
         max_s = st.session_state.get("max_steps", 10)
         step = st.session_state.get("step_number", 0)
@@ -1044,18 +1059,46 @@ def main():
                 if result.get("checkpoints"):
                     st.session_state.checkpoints = list(result["checkpoints"])
             
-            # Fix MiniMax code: pyautogui.sleep -> time.sleep; add short delays between pyautogui calls so UI can respond
-            code_to_run = code.replace("pyautogui.sleep(", "time.sleep(") if "pyautogui.sleep(" in code else code
-            # Insert time.sleep(0.6) before each pyautogui call after the first, so e.g. Spotlight appears before we type
-            code_to_run = code_to_run.replace("; pyautogui.", "; time.sleep(0.6); pyautogui.")
+            # Fix MiniMax code: ensure time is imported first, fix pyautogui.sleep, add delays between pyautogui calls
+            code_to_run = code
+            # Ensure "import time" is at the start (model sometimes puts it after pyautogui calls)
+            if "time.sleep" in code_to_run or "import time" in code_to_run:
+                # Remove any existing "import time;" or "; import time" and prepend it
+                code_to_run = code_to_run.replace("; import time;", ";").replace("; import time", "").replace("import time;", "").replace("import time", "")
+                code_to_run = "import time; " + code_to_run.strip()
+            # Fix pyautogui.sleep -> time.sleep
+            code_to_run = code_to_run.replace("pyautogui.sleep(", "time.sleep(") if "pyautogui.sleep(" in code_to_run else code_to_run
+            # Insert time.sleep(0.5) before each pyautogui call after the first, so e.g. Spotlight appears before we type
+            if "; pyautogui." in code_to_run:
+                # Ensure time is imported for these injected sleeps
+                if "import time" not in code_to_run:
+                    code_to_run = "import time; " + code_to_run
+                code_to_run = code_to_run.replace("; pyautogui.", "; time.sleep(0.5); pyautogui.")
             _log("Doing steps (executing code).", step_n, code=code_to_run)
+            print(f"[EXEC] Running code: {code_to_run[:200]}")
             # Run in module scope so pyautogui and time are available and actually control the desktop.
             # Explicitly inject pyautogui and time so exec'd code uses the real modules (not a restricted copy).
             _run_globals = dict(globals())
             _run_globals["pyautogui"] = pyautogui
             _run_globals["time"] = __import__("time")
             try:
+                print(f"[EXEC] pyautogui.PAUSE = {pyautogui.PAUSE}, executing now...")
+                # WORKAROUND: Use AppleScript to activate Finder first
+                # This ensures the browser doesn't capture keyboard shortcuts like Cmd+Space
+                import subprocess
+                try:
+                    print("[EXEC] Activating Finder via AppleScript to ensure system focus...")
+                    subprocess.run(
+                        ['osascript', '-e', 'tell application "Finder" to activate'],
+                        timeout=2,
+                        capture_output=True
+                    )
+                    _run_globals["time"].sleep(0.3)
+                except Exception as e:
+                    print(f"[EXEC] AppleScript failed (continuing anyway): {e}")
+                print("[EXEC] Now executing user code...")
                 exec(code_to_run, _run_globals)
+                print("[EXEC] Code executed successfully.")
                 # Brief pause so UI updates before we capture the "after" screenshot
                 _run_globals["time"].sleep(0.4)
                 outcome = "Pass"
