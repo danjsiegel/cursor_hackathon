@@ -115,11 +115,21 @@ def init_db():
             outcome VARCHAR,
             screenshot_before_path VARCHAR,
             screenshot_after_path VARCHAR,
+            step_verification_achieved VARCHAR,
+            step_verification_reason VARCHAR,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (session_id) REFERENCES sessions(id)
         )
     """)
-    
+    try:
+        con.execute("ALTER TABLE audit_log ADD COLUMN step_verification_achieved VARCHAR")
+    except Exception:
+        pass
+    try:
+        con.execute("ALTER TABLE audit_log ADD COLUMN step_verification_reason VARCHAR")
+    except Exception:
+        pass
+
     # Post-mortems table
     con.execute("""
         CREATE TABLE IF NOT EXISTS post_mortems (
@@ -427,6 +437,130 @@ Respond with exactly one JSON object, no markdown, no other text:
     return {"achieved": bool(achieved), "reason": reason}
 
 
+def verify_step_achieved(intended_thought: str, screenshot_path: str, user_env: str = "") -> Optional[dict]:
+    """
+    After each step: ask MiniMax "Did I actually do what I said I would do?"
+    Given the intended action (thought) and the after-screenshot, returns {achieved: bool, reason: str} or None.
+    """
+    if USE_MINIMAX_STUB or not MINIMAX_API_KEY:
+        return None
+    b64 = _encode_screenshot_base64(screenshot_path)
+    if not b64:
+        return None
+
+    system_prompt = """You are a step verifier. The agent said it would do something. This screenshot shows the state AFTER that step.
+Your job: did the agent actually do what it said? (e.g. if it said "open Calculator", is Calculator open?)
+Respond with exactly one JSON object, no markdown:
+- "achieved": true or false
+- "reason": one or two sentences: what you see in the screenshot and whether it matches what was intended."""
+    if user_env:
+        system_prompt += f"\n**User context:** {user_env}"
+
+    user_text = f"I intended to do: {intended_thought}\n\n"
+    if user_env:
+        user_text += f"User context: {user_env}\n\n"
+    user_text += "This screenshot is the state after the step. Did I actually do these things? Respond with only a JSON object: {\"achieved\": true or false, \"reason\": \"...\"}."
+
+    content_parts = [{"type": "text", "text": user_text}, {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}]
+    payload = {
+        "model": "MiniMax-M2.1",
+        "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": content_parts}],
+        "max_tokens": 256,
+    }
+    headers = {"Authorization": f"Bearer {MINIMAX_API_KEY}", "Content-Type": "application/json"}
+
+    try:
+        r = requests.post(MINIMAX_CHAT_URL, headers=headers, json=payload, timeout=30)
+        if r.status_code == 400:
+            r = requests.post(
+                MINIMAX_CHAT_URL,
+                headers=headers,
+                json={
+                    "model": "MiniMax-M2.1",
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_text + "\n\n(Screenshot was captured but could not be attached.)"},
+                    ],
+                    "max_tokens": 256,
+                },
+                timeout=30,
+            )
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        st.warning(f"Step verification request failed: {e}")
+        return None
+
+    if (data.get("base_resp") or {}).get("status_code") != 0:
+        return None
+    raw = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+    parsed = None
+    for pattern in [r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}"]:
+        m = re.search(pattern, raw)
+        if m:
+            try:
+                parsed = json.loads(m.group(1) if "```" in pattern else m.group(0))
+                break
+            except json.JSONDecodeError:
+                pass
+    if not parsed:
+        try:
+            parsed = json.loads(raw.strip())
+        except json.JSONDecodeError:
+            return None
+    achieved = parsed.get("achieved") in (True, "true", "yes", 1)
+    reason = str(parsed.get("reason") or "").strip() or "No reason given."
+    return {"achieved": bool(achieved), "reason": reason}
+
+
+def translate_step_to_code(step_description: str, user_env: str = "") -> Optional[str]:
+    """
+    Translate a natural-language step description into pyautogui Python code.
+    Returns a single line (or block) of code, or None on failure.
+    """
+    if USE_MINIMAX_STUB or not MINIMAX_API_KEY:
+        return None
+    step_description = (step_description or "").strip()
+    if not step_description:
+        return None
+
+    system_prompt = """You convert a step description into exactly one line of Python code using only pyautogui and built-ins.
+Output ONLY the code, no explanation, no markdown. Use semicolons for multiple statements. Include "import pyautogui" if needed.
+Examples:
+- "press Windows key and type Calculator" -> import pyautogui; pyautogui.press('win'); pyautogui.write('Calculator'); pyautogui.press('enter')
+- "type 3+3 and press Enter" -> import pyautogui; pyautogui.write('3+3'); pyautogui.press('enter')
+On macOS use 'command' not 'win'; on Windows use 'win'."""
+    if user_env:
+        system_prompt += f"\n**User context:** {user_env}"
+
+    user_text = f"Convert this step into pyautogui code (one line, no explanation): {step_description}"
+
+    payload = {
+        "model": "MiniMax-M2.1",
+        "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_text}],
+        "max_tokens": 256,
+    }
+    headers = {"Authorization": f"Bearer {MINIMAX_API_KEY}", "Content-Type": "application/json"}
+
+    try:
+        r = requests.post(MINIMAX_CHAT_URL, headers=headers, json=payload, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        st.warning(f"Step-to-code request failed: {e}")
+        return None
+
+    if (data.get("base_resp") or {}).get("status_code") != 0:
+        return None
+    raw = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+    raw = raw.strip()
+    # Strip markdown code fence if present
+    if raw.startswith("```"):
+        raw = re.sub(r"^```\w*\n?", "", raw)
+        raw = re.sub(r"\n?```\s*$", "", raw)
+    return raw.strip() or None
+
+
 def analyze_screenshot(screenshot_path: str, goal: str, history: list, user_env: str = "") -> dict:
     """
     Analyze screenshot and determine next action.
@@ -589,17 +723,23 @@ def main():
                     con = get_connection()
                     try:
                         logs = con.execute("""
-                            SELECT step_number, thought, status, outcome, created_at
+                            SELECT step_number, thought, status, outcome, step_verification_achieved, step_verification_reason, created_at
                             FROM audit_log
                             WHERE session_id = ?
                             ORDER BY step_number
                         """, [str(sid)]).fetchall()
                         if logs:
                             st.markdown("**Steps**")
-                            for step, thought, step_status, outcome, _ in logs:
+                            for row in logs:
+                                step, thought, step_status, outcome = row[0], row[1], row[2], row[3]
+                                step_ver_ok = row[4] if len(row) > 4 else None
+                                step_ver_reason = row[5] if len(row) > 5 else None
                                 icon = "✅" if outcome == "Pass" else "❌" if outcome == "Fail" else "⏳"
                                 st.markdown(f"{icon} Step {step} ({step_status})")
                                 st.text(thought or "—")
+                                if step_ver_ok is not None or step_ver_reason:
+                                    ver_icon = "✅" if str(step_ver_ok).lower() == "true" else "❌"
+                                    st.caption(f"Verified {ver_icon}: {step_ver_reason or ''}")
                         pm = con.execute("""
                             SELECT original_goal, perfect_prompt, summary, validation_achieved, validation_reason
                             FROM post_mortems
@@ -692,7 +832,7 @@ def main():
         if st.session_state.get("session_id"):
             con = get_connection()
             logs = con.execute("""
-                SELECT step_number, thought, status, outcome, created_at
+                SELECT step_number, thought, status, outcome, step_verification_achieved, step_verification_reason, created_at
                 FROM audit_log
                 WHERE session_id = ?
                 ORDER BY step_number
@@ -701,10 +841,15 @@ def main():
             
             if logs:
                 for log in logs:
-                    step, thought, status, outcome, created = log
+                    step, thought, status, outcome = log[0], log[1], log[2], log[3]
+                    step_ver_ok = log[4] if len(log) > 4 else None
+                    step_ver_reason = log[5] if len(log) > 5 else None
                     status_icon = "✅" if outcome == "Pass" else "❌" if outcome == "Fail" else "⏳"
                     st.markdown(f"**Step {step}** {status_icon} ({status})")
                     st.text(thought or "—")
+                    if step_ver_ok is not None or step_ver_reason:
+                        ver_icon = "✅" if str(step_ver_ok).lower() == "true" else "❌"
+                        st.caption(f"Step verified {ver_icon}: {step_ver_reason or ''}")
                     st.divider()
             else:
                 st.text("No logs yet.")
@@ -735,6 +880,12 @@ def main():
             thought = result["thought"]
             code = result["code"]
             status = result["status"]
+
+            # If agent returned no code (or "pass"), translate step description into code
+            if (not code or code.strip() in ("", "pass")) and (thought or "").strip():
+                translated = translate_step_to_code(thought, user_env)
+                if translated:
+                    code = translated
 
             # First step: store planned total_steps and checkpoints from MiniMax
             if st.session_state.step_number == 1:
@@ -784,6 +935,43 @@ def main():
             after_path = f"{SCREENSHOTS_DIR}/{st.session_state.session_id}/step_{st.session_state.step_number}_after.png"
             _, after_screenshot_path = capture_screenshot(after_path)
 
+            # Per-step verification: did we actually do what we said we would?
+            step_verification = verify_step_achieved(thought, after_screenshot_path, user_env)
+            step_ver_achieved = None
+            step_ver_reason = None
+            if step_verification is not None:
+                step_ver_achieved = str(step_verification.get("achieved", False))
+                step_ver_reason = step_verification.get("reason", "")
+                if not step_verification.get("achieved", True):
+                    outcome = "Fail"
+                    feedback = f"Step verification: {step_ver_reason}"
+                    con = get_connection()
+                    action_summary = (thought[:120] + "…") if thought and len(thought) > 120 else (thought or "—")
+                    con.execute("""
+                        INSERT INTO audit_log 
+                        (session_id, step_number, thought, code, action, feedback, status, outcome, 
+                         screenshot_before_path, screenshot_after_path, step_verification_achieved, step_verification_reason)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, [
+                        st.session_state.session_id,
+                        st.session_state.step_number,
+                        thought,
+                        code,
+                        action_summary,
+                        feedback,
+                        status,
+                        outcome,
+                        screenshot_path,
+                        after_screenshot_path,
+                        step_ver_achieved,
+                        step_ver_reason,
+                    ])
+                    con.execute("UPDATE sessions SET status = ? WHERE id = ?", ["error", st.session_state.session_id])
+                    con.close()
+                    st.session_state.is_running = False
+                    st.error(f"Step verification failed: {step_ver_reason}. Stopping.")
+                    st.rerun()
+
             # At checkpoint steps: save validation screenshot and re-confirm cycle
             if st.session_state.step_number in st.session_state.get("checkpoints", []):
                 validation_path = f"{SCREENSHOTS_DIR}/{st.session_state.session_id}/step_{st.session_state.step_number}_validation.png"
@@ -791,11 +979,12 @@ def main():
             
             # Log to DuckDB (action = short summary of thought for display)
             action_summary = (thought[:120] + "…") if thought and len(thought) > 120 else (thought or "—")
+            con = get_connection()
             con.execute("""
                 INSERT INTO audit_log 
                 (session_id, step_number, thought, code, action, feedback, status, outcome, 
-                 screenshot_before_path, screenshot_after_path)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 screenshot_before_path, screenshot_after_path, step_verification_achieved, step_verification_reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, [
                 st.session_state.session_id,
                 st.session_state.step_number,
@@ -806,7 +995,9 @@ def main():
                 status,
                 outcome,
                 screenshot_path,
-                after_screenshot_path
+                after_screenshot_path,
+                step_ver_achieved,
+                step_ver_reason,
             ])
             con.close()
             
